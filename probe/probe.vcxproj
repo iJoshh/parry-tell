@@ -35,7 +35,11 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <AdditionalIncludeDirectories>$(ProjectDir)vendor\MinHook;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
+    <Link>
+      <AdditionalDependencies>version.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
     <Link>
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
@@ -45,6 +49,21 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="probe.cpp" />
+    <ClCompile Include="vendor\MinHook\hook.c" />
+    <ClCompile Include="vendor\MinHook\buffer.c" />
+    <ClCompile Include="vendor\MinHook\trampoline.c" />
+    <ClCompile Include="vendor\MinHook\hde64.c" />
+    <ClCompile Include="vendor\MinHook\hde32.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="vendor\MinHook\MinHook.h" />
+    <ClInclude Include="vendor\MinHook\buffer.h" />
+    <ClInclude Include="vendor\MinHook\trampoline.h" />
+    <ClInclude Include="vendor\MinHook\hde64.h" />
+    <ClInclude Include="vendor\MinHook\hde32.h" />
+    <ClInclude Include="vendor\MinHook\table64.h" />
+    <ClInclude Include="vendor\MinHook\table32.h" />
+    <ClInclude Include="vendor\MinHook\pstdint.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

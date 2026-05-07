@@ -19,3 +19,7 @@ Thumbs.db
 
 # Tarballs are intentionally committed under probe/releases/
 # Logs/CSVs are intentionally committed under probe/runs/
+
+# Codex/Claude research workspaces (raw artifacts, not for repo)
+research/codex-workspace/
+research/claude-workspace/
