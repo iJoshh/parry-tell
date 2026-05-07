@@ -52,9 +52,12 @@ credential means losing network access entirely.
   Co-op safety depends on `regulation.bin` and other base game files being
   unreachable from the VM. If wider access seems needed, propose a narrowly
   scoped second share, never the parent dir.
-- **Never** attempt to invoke MSBuild or any Windows binary remotely.
-  Builds happen on Josh's Windows box, by Josh. SMB is for file transfer
-  only — no execution channel.
+- **Build channel via SSH is now active** (added 2026-05-06 evening). Claude
+  can SCP source to Windows and trigger MSBuild remotely via SSH as the
+  `claude` user (key auth only, Tailscale-scoped firewall, MANUAL service
+  start — not auto-on-boot). Josh starts the SSH service when working
+  together, stops it when done. See HANDOFF.md for the kill-switch chain.
+  Build path: `C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe`
 - **Never** touch `regulation.bin`, `.dcx` archives, or any base game file.
   These are read-only on the Windows side and the VM can't reach them
   anyway, but the rule stays explicit: if you ever DO see them, do not
@@ -81,34 +84,27 @@ Every write to `/mnt/station-mods/` shows up in Josh's Windows event log
 under `claude` as the SMB user. If Josh ever wants to verify what Claude
 did, he can pull the audit trail from there.
 
-## Probe development workflow (post-2026-05-06)
+## Probe development workflow (current as of 2026-05-06 v4)
 
-Old workflow: Resend email tarballs → Josh extracts → Josh builds → Josh
-copies DLL → Josh emails or drops logs back.
-
-New workflow:
+Full pipeline runs on Claude's side:
 
 1. Claude edits probe source locally at `~/claude/elden-ring/probe/probe.cpp`
 2. Claude reviews via Codex (writer-pairing rule from user-global memory)
-3. Claude builds tarball, ships via Resend OR drops directly into a
-   designated drop folder Josh creates under `C:\Projects\elden-ring\`
-   (TBD — for now, email)
-4. Josh extracts + rebuilds in Visual Studio (this remains a manual step
-   until/unless we set up an SSH-driven build)
-5. **Claude copies the new DLL from `/mnt/station-projects/elden-ring/probe/bin/Release/`
-   to `/mnt/station-mods/parry-tell-probe.dll`** — this is new, replaces
-   Josh manually copying
-6. **Claude deletes `/mnt/station-mods/parry-tell-probe.csv`** to start
-   fresh
-7. Josh runs the game test
-8. Claude reads `/mnt/station-mods/parry-tell-probe.csv` for the live CSV,
-   reads `STATION-vN.log` from `/mnt/station-projects/elden-ring/` for
-   the DebugView capture
-9. Score, iterate
+3. Claude SCPs source to `claude@station:C:\Projects\elden-ring\probe\probe.cpp`
+4. Claude triggers MSBuild via SSH:
+   `ssh claude@station '"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" "C:\Projects\elden-ring\probe\probe.vcxproj" /p:Configuration=Release /p:Platform=x64 /t:Rebuild /v:minimal'`
+5. Claude reads build output via SMB at `/mnt/station-projects/elden-ring/probe/bin/Release/parry-tell-probe.dll`
+6. Claude commits tarball to `probe/releases/probe-vN.tar.gz` for audit trail
+7. **Wait for Josh's "ready to reload" signal** (file locks prevent install while game is running)
+8. Claude copies DLL to `/mnt/station-mods/parry-tell-probe.dll`
+9. Claude deletes stale `/mnt/station-mods/parry-tell-probe.csv` to start fresh
+10. Josh launches game, runs test, saves DebugView log to `C:\Projects\elden-ring\STATION-vN.log`
+11. Claude reads everything from `/mnt/station-projects/` and `/mnt/station-mods/` directly
+12. Score, iterate
 
-The pivotal change: steps 5-6 used to require Josh's keyboard time, now
-they don't. Build is still Josh's job because we don't have a Windows
-build channel set up.
+Josh's only manual steps: launching the game, playing it, saving the DebugView
+log. Everything else is on Claude's side. SSH service is manually started by
+Josh at session beginning, manually stopped at end (see kill-switch email).
 
 ## What's NOT changed
 

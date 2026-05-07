@@ -2,8 +2,11 @@
 //
 // parry-tell probe DLL
 //
+// Version:
+//   parry-tell probe v4
+//
 // Purpose:
-//   Gate 0 instrumentation for ER 1.16.1. This DLL logs live combat memory reads
+//   Gate 0 instrumentation for ER 2.6.1.0. This DLL logs live combat memory reads
 //   into parry-tell-probe.csv for offline analysis. It intentionally does no UI,
 //   no audio, and no gameplay writes.
 //
@@ -29,7 +32,7 @@
 namespace {
 
 // -----------------------------------------------------------------------------
-// Offsets (ER 1.16.1)
+// Offsets (ER 2.6.1.0)
 // Credit: TarnishedTool by borgCode (MIT-licensed), summarized in
 // archaeology/06-tarnishedtool-borrow-map.md and PROBE-SPEC.md.
 // -----------------------------------------------------------------------------
@@ -57,12 +60,12 @@ constexpr uintptr_t WCM_CHR_SET_POOL          = 0x10EF8;
 constexpr uintptr_t WCM_PLAYER_INS            = 0x1E508;   // TarnishedTool Offsets.cs:PlayerIns modern
 
 // ChrIns fields.
-constexpr uintptr_t CHR_INS_ENTITY_ID         = 0x80;      // PROBE-SPEC.md
-constexpr uintptr_t CHR_INS_BLOCK_ID          = 0x6C;      // PROBE-SPEC.md
+constexpr uintptr_t CHR_INS_ENTITY_ID         = 0x1E8;     // TarnishedTool Offsets.cs:146-152 (>1.7.0 branch)
+constexpr uintptr_t CHR_INS_BLOCK_ID          = 0x38;      // TarnishedTool Offsets.cs:139
 constexpr uintptr_t CHR_INS_NPC_PARAM_ID      = 0x60;      // PROBE-SPEC.md
 constexpr uintptr_t CHR_INS_MODULE_BAG        = 0x190;     // PROBE-SPEC.md
 constexpr uintptr_t CHR_INS_CHR_MANIPULATOR   = 0x580;     // PROBE-SPEC.md
-constexpr uintptr_t CHR_INS_CHR_TYPE          = 0x68;      // PROBE-SPEC.md
+constexpr uintptr_t CHR_INS_CHR_TYPE          = 0x64;      // TarnishedTool Offsets.cs:142 (TT name: ChrId)
 
 // Modules/animation.
 constexpr uintptr_t MOD_TIME_ACT              = 0x18;
@@ -97,6 +100,7 @@ constexpr uint32_t GAME_READY_TIMEOUT_MS    = 60 * 1000;
 constexpr uint32_t GAME_READY_POLL_MS       = 500;
 constexpr uint32_t FRAME_SLEEP_MS           = 33;
 constexpr uint32_t HEARTBEAT_MS             = 1000;
+constexpr size_t   WCM_DUMP_SIZE_BYTES      = 0x20000;
 
 HMODULE g_module = nullptr;
 char g_log_path[MAX_PATH] = {};
@@ -192,6 +196,73 @@ void append_text(HANDLE file, const char* s) {
     write_bytes(file, s, strlen(s));
 }
 
+void build_wcm_dump_path(char out_path[MAX_PATH]) {
+    if (!out_path) {
+        return;
+    }
+    out_path[0] = 0;
+    if (g_log_path[0] == 0) {
+        snprintf(out_path, MAX_PATH, "parry-tell-probe-wcm-dump.bin");
+        return;
+    }
+
+    int last_sep = -1;
+    for (int i = 0; g_log_path[i]; ++i) {
+        if (g_log_path[i] == '\\' || g_log_path[i] == '/') {
+            last_sep = i;
+        }
+    }
+
+    if (last_sep < 0) {
+        snprintf(out_path, MAX_PATH, "parry-tell-probe-wcm-dump.bin");
+        return;
+    }
+
+    for (int i = 0; i <= last_sep && i < MAX_PATH - 1; ++i) {
+        out_path[i] = g_log_path[i];
+    }
+    out_path[last_sep + 1] = 0;
+    snprintf(out_path + last_sep + 1, MAX_PATH - last_sep - 1, "parry-tell-probe-wcm-dump.bin");
+}
+
+void dump_wcm_region(uintptr_t world_chr_man) {
+    if (world_chr_man == 0) {
+        OutputDebugStringA("[parry-tell-probe] WCM dump skipped: WorldChrMan is null\n");
+        return;
+    }
+
+    char dump_path[MAX_PATH] = {};
+    build_wcm_dump_path(dump_path);
+
+    HANDLE dump_file =
+        CreateFileA(dump_path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (dump_file == INVALID_HANDLE_VALUE) {
+        char msg[MAX_PATH + 128];
+        snprintf(msg, sizeof(msg),
+                 "[parry-tell-probe] WCM dump FAILED: cannot open %s\n",
+                 dump_path);
+        OutputDebugStringA(msg);
+        return;
+    }
+
+    for (size_t off = 0; off < WCM_DUMP_SIZE_BYTES; off += sizeof(uint64_t)) {
+        auto chunk = safe_read<uint64_t>(world_chr_man + off);
+        const uint64_t value = chunk.value_or(0ull);
+        DWORD written = 0;
+        WriteFile(dump_file, &value, static_cast<DWORD>(sizeof(value)), &written, nullptr);
+    }
+
+    CloseHandle(dump_file);
+
+    char msg[MAX_PATH + 192];
+    snprintf(msg, sizeof(msg),
+             "[parry-tell-probe] WCM dump complete: %s (%llu bytes from 0x%p)\n",
+             dump_path,
+             static_cast<unsigned long long>(WCM_DUMP_SIZE_BYTES),
+             reinterpret_cast<void*>(world_chr_man));
+    OutputDebugStringA(msg);
+}
+
 struct BossSnapshot {
     int boss_slot = -1;
     uint64_t boss_handle = FE_INVALID_HANDLE;
@@ -249,7 +320,7 @@ struct CsvWriter {
             GetLocalTime(&st);
             char line[1024];
 
-            snprintf(line, sizeof(line), "# parry-tell probe v1\r\n");
+            snprintf(line, sizeof(line), "# parry-tell probe v4\r\n");
             append_text(file, line);
             snprintf(line, sizeof(line), "# eldenring.exe module base: 0x%p\r\n", reinterpret_cast<void*>(module_base));
             append_text(file, line);
@@ -436,11 +507,11 @@ std::optional<WorldState> snapshot_world(uintptr_t module_base, uint64_t elapsed
         snap.chr_ins = *chr_ptr;
 
         auto npc_param = safe_read<uint32_t>(*chr_ptr + CHR_INS_NPC_PARAM_ID);
-        if (!npc_param) return std::nullopt;
+        if (!npc_param) continue;
         snap.npc_param_id = *npc_param;
 
         auto ent = safe_read<uint32_t>(*chr_ptr + CHR_INS_ENTITY_ID);
-        if (!ent) return std::nullopt;
+        if (!ent) continue;
         snap.entity_id = *ent;
 
         auto mod_bag = safe_read<uintptr_t>(*chr_ptr + CHR_INS_MODULE_BAG);
@@ -456,7 +527,7 @@ std::optional<WorldState> snapshot_world(uintptr_t module_base, uint64_t elapsed
         auto anim_id = safe_read<int32_t>(*time_act + TA_ANIMATION_ID);
         auto blob = safe_read_16(*time_act + TA_ANIM_TIME_RAW_START);
         if (!anim_id || !blob) {
-            return std::nullopt;
+            continue;
         }
         snap.animation_id = *anim_id;
         snap.anim_time_blob = *blob;
@@ -668,6 +739,7 @@ DWORD WINAPI worker_thread(LPVOID) {
         OutputDebugStringA(banner);
         return 0;
     }
+    dump_wcm_region(world_chr_man);
     OutputDebugStringA("[parry-tell-probe] CSV opened; entering capture loop\n");
 
     if (!game_ready) {
