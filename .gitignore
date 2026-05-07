@@ -23,3 +23,11 @@ Thumbs.db
 # Codex/Claude research workspaces (raw artifacts, not for repo)
 research/codex-workspace/
 research/claude-workspace/
+
+# Raw 2.5 GB TAE extraction lives on the Projects share, NEVER in repo.
+# Parser writes data/parry_data.json (which IS committed).
+data/chr-extracted/
+data/raw/
+data/*.tar.gz
+data/*.zip
+*.anibnd.dcx

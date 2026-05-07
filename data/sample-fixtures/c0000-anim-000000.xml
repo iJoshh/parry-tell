@@ -1,0 +1,406 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<anim>
+  <name>a000_000000.hkt</name>
+  <header>
+    <type>Standard</type>
+    <allowDelayLoad>false</allowDelayLoad>
+    <importsHkx>false</importsHkx>
+    <loopByDefault>false</loopByDefault>
+    <importHkxSourceAnimId>0</importHkxSourceAnimId>
+  </header>
+  <events>
+    <event>
+      <type>0</type>
+      <unk04>0</unk04>
+      <startTime>0</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="FlagType" value="64" />
+        <param name="ArgA" value="0" />
+        <param name="ArgB" value="-1" />
+        <param name="ArgC" value="6" />
+        <param name="ArgD" value="0" />
+        <param name="StateInfo" value="0" />
+      </params>
+    </event>
+    <event>
+      <type>0</type>
+      <unk04>0</unk04>
+      <startTime>0.06666667</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="FlagType" value="4" />
+        <param name="ArgA" value="0" />
+        <param name="ArgB" value="-1" />
+        <param name="ArgC" value="6" />
+        <param name="ArgD" value="0" />
+        <param name="StateInfo" value="0" />
+      </params>
+    </event>
+    <event>
+      <type>0</type>
+      <unk04>0</unk04>
+      <startTime>0.06666667</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="FlagType" value="16" />
+        <param name="ArgA" value="0" />
+        <param name="ArgB" value="-1" />
+        <param name="ArgC" value="6" />
+        <param name="ArgD" value="0" />
+        <param name="StateInfo" value="0" />
+      </params>
+    </event>
+    <event>
+      <type>0</type>
+      <unk04>0</unk04>
+      <startTime>0.06666667</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="FlagType" value="104" />
+        <param name="ArgA" value="0" />
+        <param name="ArgB" value="-1" />
+        <param name="ArgC" value="6" />
+        <param name="ArgD" value="0" />
+        <param name="StateInfo" value="0" />
+      </params>
+    </event>
+    <event>
+      <type>0</type>
+      <unk04>0</unk04>
+      <startTime>0.06666667</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="FlagType" value="26" />
+        <param name="ArgA" value="0" />
+        <param name="ArgB" value="-1" />
+        <param name="ArgC" value="6" />
+        <param name="ArgD" value="0" />
+        <param name="StateInfo" value="0" />
+      </params>
+    </event>
+    <event>
+      <type>0</type>
+      <unk04>0</unk04>
+      <startTime>0.06666667</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="FlagType" value="31" />
+        <param name="ArgA" value="0" />
+        <param name="ArgB" value="-1" />
+        <param name="ArgC" value="6" />
+        <param name="ArgD" value="0" />
+        <param name="StateInfo" value="0" />
+      </params>
+    </event>
+    <event>
+      <type>0</type>
+      <unk04>0</unk04>
+      <startTime>0.06666667</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="FlagType" value="29" />
+        <param name="ArgA" value="0" />
+        <param name="ArgB" value="-1" />
+        <param name="ArgC" value="6" />
+        <param name="ArgD" value="0" />
+        <param name="StateInfo" value="0" />
+      </params>
+    </event>
+    <event>
+      <type>0</type>
+      <unk04>0</unk04>
+      <startTime>0.06666667</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="FlagType" value="32" />
+        <param name="ArgA" value="0" />
+        <param name="ArgB" value="-1" />
+        <param name="ArgC" value="6" />
+        <param name="ArgD" value="0" />
+        <param name="StateInfo" value="0" />
+      </params>
+    </event>
+    <event>
+      <type>227</type>
+      <unk04>0</unk04>
+      <startTime>0</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="EzStateFlagID" value="0" />
+      </params>
+    </event>
+    <event>
+      <type>67</type>
+      <unk04>0</unk04>
+      <startTime>0</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="SpEffectID" value="503045" />
+      </params>
+    </event>
+    <event>
+      <type>16</type>
+      <unk04>0</unk04>
+      <startTime>0</startTime>
+      <endTime>0.33333334</endTime>
+      <params />
+    </event>
+    <event>
+      <type>700</type>
+      <unk04>0</unk04>
+      <startTime>0</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="UpLimitAngle" value="-1" />
+        <param name="DownLimitAngle" value="-1" />
+        <param name="RightLimitAngle" value="-1" />
+        <param name="LeftLimitAngle" value="-1" />
+        <param name="ModifierID" value="0" />
+        <param name="TargetType" value="3" />
+        <param name="Unk15" value="255" />
+        <param name="Unk16" value="0" />
+        <param name="Unk17" value="0" />
+        <param name="UpMinimumAngle" value="-1" />
+        <param name="DownMinimumAngle" value="-1" />
+        <param name="RightMinimumAngle" value="-1" />
+        <param name="LeftMinimumAngle" value="-1" />
+      </params>
+    </event>
+    <event>
+      <type>700</type>
+      <unk04>0</unk04>
+      <startTime>0</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="UpLimitAngle" value="-1" />
+        <param name="DownLimitAngle" value="-1" />
+        <param name="RightLimitAngle" value="-1" />
+        <param name="LeftLimitAngle" value="-1" />
+        <param name="ModifierID" value="301" />
+        <param name="TargetType" value="9" />
+        <param name="Unk15" value="255" />
+        <param name="Unk16" value="0" />
+        <param name="Unk17" value="0" />
+        <param name="UpMinimumAngle" value="-1" />
+        <param name="DownMinimumAngle" value="-1" />
+        <param name="RightMinimumAngle" value="-1" />
+        <param name="LeftMinimumAngle" value="-1" />
+      </params>
+    </event>
+    <event>
+      <type>700</type>
+      <unk04>0</unk04>
+      <startTime>0</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="UpLimitAngle" value="-1" />
+        <param name="DownLimitAngle" value="-1" />
+        <param name="RightLimitAngle" value="-1" />
+        <param name="LeftLimitAngle" value="-1" />
+        <param name="ModifierID" value="311" />
+        <param name="TargetType" value="8" />
+        <param name="Unk15" value="255" />
+        <param name="Unk16" value="0" />
+        <param name="Unk17" value="0" />
+        <param name="UpMinimumAngle" value="-1" />
+        <param name="DownMinimumAngle" value="-1" />
+        <param name="RightMinimumAngle" value="-1" />
+        <param name="LeftMinimumAngle" value="-1" />
+      </params>
+    </event>
+    <event>
+      <type>605</type>
+      <unk04>0</unk04>
+      <startTime>0</startTime>
+      <endTime>100</endTime>
+      <params>
+        <param name="Unk00" value="False" />
+        <param name="VariableID" value="0" />
+        <param name="ValueGradient" value="1|1" />
+      </params>
+    </event>
+  </events>
+  <eventGroups>
+    <eventGroup>
+      <type>0</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="0" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>0</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="1" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>0</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="2" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>0</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="3" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>0</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="4" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>0</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="5" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>0</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="6" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>0</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="7" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>227</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="8" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>67</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="9" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>16</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="10" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>700</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="11" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>700</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="12" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>700</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="13" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>605</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="14" />
+      </events>
+    </eventGroup>
+  </eventGroups>
+</anim>

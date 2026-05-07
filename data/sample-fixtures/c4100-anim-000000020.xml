@@ -1,0 +1,159 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<anim>
+  <name>a000_000020.hkt</name>
+  <header>
+    <type>Standard</type>
+    <allowDelayLoad>false</allowDelayLoad>
+    <importsHkx>false</importsHkx>
+    <loopByDefault>false</loopByDefault>
+    <importHkxSourceAnimId>-1</importHkxSourceAnimId>
+  </header>
+  <events>
+    <event>
+      <type>224</type>
+      <unk04>0</unk04>
+      <startTime>0</startTime>
+      <endTime>1.6666666</endTime>
+      <params>
+        <param name="TurnSpeed" value="5" />
+        <param name="IsLockOnCheck" value="False" />
+        <param name="NewUnkArg" value="255" />
+      </params>
+    </event>
+    <event>
+      <type>16</type>
+      <unk04>0</unk04>
+      <startTime>0</startTime>
+      <endTime>0.6666667</endTime>
+      <params />
+    </event>
+    <event>
+      <type>129</type>
+      <unk04>0</unk04>
+      <startTime>0.033333335</startTime>
+      <endTime>0.13333334</endTime>
+      <params>
+        <param name="SoundType" value="1" />
+        <param name="SoundID" value="410018910" />
+        <param name="DummyPolyID" value="-1" />
+        <param name="SlotID" value="-1" />
+        <param name="StateInfo" value="337" />
+        <param name="PlaybackBehaviorType" value="0" />
+        <param name="Unk13" value="1" />
+        <param name="Unk14" value="1" />
+        <param name="Unk18" value="0" />
+        <param name="SoundIDOffsetType" value="-1" />
+      </params>
+    </event>
+    <event>
+      <type>700</type>
+      <unk04>0</unk04>
+      <startTime>0</startTime>
+      <endTime>2</endTime>
+      <params>
+        <param name="UpLimitAngle" value="-1" />
+        <param name="DownLimitAngle" value="-1" />
+        <param name="RightLimitAngle" value="-1" />
+        <param name="LeftLimitAngle" value="-1" />
+        <param name="ModifierID" value="0" />
+        <param name="TargetType" value="0" />
+        <param name="Unk15" value="255" />
+        <param name="Unk16" value="0" />
+        <param name="Unk17" value="0" />
+        <param name="UpMinimumAngle" value="-1" />
+        <param name="DownMinimumAngle" value="-1" />
+        <param name="RightMinimumAngle" value="-1" />
+        <param name="LeftMinimumAngle" value="-1" />
+      </params>
+    </event>
+    <event>
+      <type>129</type>
+      <unk04>0</unk04>
+      <startTime>0.033333335</startTime>
+      <endTime>0.13333334</endTime>
+      <params>
+        <param name="SoundType" value="1" />
+        <param name="SoundID" value="410028910" />
+        <param name="DummyPolyID" value="-1" />
+        <param name="SlotID" value="-1" />
+        <param name="StateInfo" value="338" />
+        <param name="PlaybackBehaviorType" value="0" />
+        <param name="Unk13" value="1" />
+        <param name="Unk14" value="1" />
+        <param name="Unk18" value="0" />
+        <param name="SoundIDOffsetType" value="-1" />
+      </params>
+    </event>
+  </events>
+  <eventGroups>
+    <eventGroup>
+      <type>224</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="0" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>128</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="2" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>128</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="4" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>128</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+    </eventGroup>
+    <eventGroup>
+      <type>16</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="1" />
+      </events>
+    </eventGroup>
+    <eventGroup>
+      <type>700</type>
+      <dataType>GroupData0</dataType>
+      <area>0</area>
+      <block>0</block>
+      <cutsceneEntityType>Character</cutsceneEntityType>
+      <cutsceneEntityId1>0</cutsceneEntityId1>
+      <cutsceneEntityId2>0</cutsceneEntityId2>
+      <events>
+        <event index="3" />
+      </events>
+    </eventGroup>
+  </eventGroups>
+</anim>
