@@ -1,112 +1,129 @@
 # parry-tell — HANDOFF
 
-**Last session:** 2026-05-06 evening through 2026-05-07 ~midnight CT
-**Status:** Probe v4 confirmed to cause game crashes. Probe disabled on Windows side. Major workflow infrastructure built (Tailscale + SMB + SSH+MSBuild). Next session: design v5 from minimal-invasion posture.
+**Last session:** 2026-05-07 morning, through compact at ~10:15 CT.
+**Status:** Phase 2 essentially complete. Probe works. Starting PHASE3-PLAN.md next.
 
 ## Where we are
 
-**Game-side state on station (Windows dev box):**
-- `parry-tell-probe.dll` is **renamed to `.old`** in mods folder. Game runs normally without our probe.
-- Confirmed by Josh: zero crashes since rename. Was crashing 5x in 73 min with probe loaded. Root cause (mechanism) unknown but field evidence is dispositive.
+**Probe v5f is installed on station and working.** Hook-based, F11-armed,
+no crashes across multiple sessions. Production-quality scaffolding for
+Phase 3.
 
-**Build infrastructure (NEW this session):**
-- Tailscale mesh: VM (`codeserver-vm`) + Windows (`station`) on tailnet `ijoshh.github`
-- SMB shares: `Projects` (RO at `/mnt/station-projects/`), `mods` (RW at `/mnt/station-mods/`)
-- SSH access: VM → station as `claude` user, key auth only, Tailscale-scoped firewall, **MANUAL service start** (Josh starts before sessions, stops after)
-- MSBuild path on station: `C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe`
-- VM-side minidump tooling installed: `~/.cargo/bin/minidump-stackwalk` and `~/.cargo/bin/dump_syms` (both via cargo, current Rust 1.95)
+**v5f file:** `/mnt/station-mods/parry-tell-probe.dll`
+**v5f md5:** `3dc6b79c841bef0be0f4f6e376bb4973`
+**v5f source:** `probe/probe.cpp` (HEAD = `95c3e25`)
 
-**Project state on VM:**
-- All work committed to git, pushed to private GitHub at https://github.com/iJoshh/parry-tell
-- Latest commit: `5072b42 feat: probe v4 — fix stale ChrIns offsets for ER 2.6.1.0`
-- Probe runs/ folders: `run-2-2026-05-06-1815-CT/` (v2 plumbing test), `run-3-2026-05-06-2255-CT-v4-CRASH/` (v4 crash run)
-- Releases/ folder: probe-v2-patched.tar.gz, probe-v3.tar.gz, probe-v4.tar.gz
+If a future session needs to disable the probe, rename
+`/mnt/station-mods/parry-tell-probe.dll` → `parry-tell-probe.dll.old`
+(strip the `.dll` extension so Mod Loader skips it).
 
-## Major findings this session
+## What we know (from in-game v5e + v5f data)
 
-### Offset bugs in PROBE-SPEC.md
+**Player chain (locked):**
+- WCM global resolved via signature `48 8B 05 ? ? ? ? 48 85 C0 74 0F 48 39 88` + RIP-relative deref
+- `WCM + 0x10EF8` → `ChrIns** playerArray[4]`
+- `playerArray[0]` is the local player
+- Two derefs (slotEntry → chrIns) + handle round-trip via
+  `GetChrInsFromHandle(world, &chrIns->handle)` gives a stable, canonical
+  ChrIns pointer that doesn't move for the entire session
 
-Three CHR_INS offsets were stale (correct for ER ≤1.6.0, wrong for 2.6.1.0):
-- `CHR_INS_ENTITY_ID`: should be `0x1E8`, was `0x80`
-- `CHR_INS_BLOCK_ID`: should be `0x38`, was `0x6C`
-- `CHR_INS_CHR_TYPE`: should be `0x64`, was `0x68`
+**Confirmed playerArray[0] is a `PlayerIns`, NOT a generic `ChrIns`:**
+- mapX at chrIns+0x6C0 (float, world coord X) — confirmed by walking and seeing values change smoothly
+- mapAngle at chrIns+0x6CC (float, radians, -π..+π) — confirmed
+- handle at chrIns+0x8 (uint64_t) — confirmed stable
+- blockId at chrIns+0x6D0 — TarnishedTool says this; in our data it's
+  NOT actually blockId, returns a few float-ish constants. **Offset is
+  wrong for 2.6.1, OR this isn't blockId.** Doesn't matter for Phase 3.
+- Generic ChrIns offsets (entity_id +0x1E8, blockId +0x38) DO NOT APPLY
+  to this slot. Don't use them.
 
-Verified against TarnishedTool's version-switched offset table for `Version2_6_1`. v4 source has the corrected values.
+**Hook architecture:**
+- Hook target: `UpdateUIBarStructs` (game's per-frame UI update fn)
+- Detour signature: `void(uintptr_t moveMapStep, uintptr_t time)` —
+  must match exactly, two args
+- Detour calls SampleOnce() iff armed AND >=1s since last (CAS-gated),
+  then chains to original
+- F11 toggles `g_armed` from a separate watcher thread (zero game-memory
+  reads from that thread)
 
-### `WCM + 0x1E508` may not be the player slot for ER 2.6.1.0
+**Module pinned** via `GetModuleHandleEx(PIN | FROM_ADDRESS)` — cannot be
+unloaded mid-session.
 
-Even with v4's correct CHR_INS_ENTITY_ID, all 20 successful reads at `chr+0x1E8` returned `entity=0x00000000`. Either:
-- `WCM + 0x1E508` returns something OTHER than player ChrIns (overlapping field, internal struct pointer)
-- Player slot needs an additional dereference layer
-- The offset is right but the player entity ID truly is zero in this state (unlikely)
+**Performance:**
+- v5d/v5e had a per-second hitch caused by ~30 VirtualQuery syscalls per
+  sample on the game thread.
+- v5f introduced `LooksLikeUserPtrFast` (pure compute) for hot path; SEH
+  catches real faults via SafeRead<T>. Hitch is gone.
+- Slow VirtualQuery-backed `LooksReadable<T>` and `LooksLikeUserPtr` are
+  retained for init-time use only (sig scan, RIP deref).
 
-WCM struct memory dump (131KB) preserved at `probe/runs/run-3-2026-05-06-2255-CT-v4-CRASH/parry-tell-probe-wcm-dump.bin` for offline static analysis. **Analyzing this offline is the path to finding the right offset without putting the probe in the game.**
+## What we DO NOT know (open for Phase 3)
 
-### Probe-induced crashes
+- **Target handle offset.** When you lock onto an enemy, where does your
+  PlayerIns store the target? Phase 3.1 needs to find this — likely via
+  hit-region memory diff during lock-on/unlock cycles.
+- **Animation state offsets.** What field signals "I am being attacked
+  by a parryable attack right now"? This is the actually-hard problem
+  for the parry-tell mod. Likely lives off the chrModuleBag pointer at
+  +0x190 (TarnishedTool) — but THAT offset is the generic ChrIns
+  layout, which may or may not apply via the PlayerIns wrapper.
+- **HP / stagger offsets** if we want to make the cue smarter (don't
+  fire while in iframes / dead).
+- **D3D12 hook target** for the visual cue (screen-edge hue). We've
+  been hooking gameplay logic; visual rendering needs a different hook.
 
-5 crashes in 73 min vs baseline of 1-2 per 5 hours. Crash signatures: `STATUS_HEAP_CORRUPTION` and `FAST_FAIL_INVALID_REFERENCE_COUNT`. Crash dumps live on station at `C:\Users\Josh\AppData\Local\CrashDumps\`. All analyzed in this session via minidump-stackwalk + Microsoft symbol server + dump_syms-converted PDB symbols.
+## Phase 2 → Phase 3 transition
 
-**Suspected mechanism (not confirmed):** v4's WCM memory dump (131072 bytes read at probe init) plus aggressive prio queue walk (changed `return std::nullopt` to `continue`, multiplying reads per frame by 10-100x) likely reads memory at offsets that overlap with kernel-managed pages or heap free-list metadata. SEH wraps the reads but only catches HARD faults (unmapped page); valid-but-wrong reads succeed silently and return garbage that can corrupt state when used downstream.
+**Phase 2 deliverables (all in repo):**
+- `probe/probe.cpp` — production-quality Phase 2 probe
+- `probe/vendor/MinHook/` — vendored MinHook (BSD-2)
+- `probe/probe.vcxproj` — builds with v145 toolset on station
+- `research/SYNTHESIS.md` — Phase 2 research synthesis
+- `research/phase2-research-{claude,codex}.md` — parallel blind reads
+- `research/v5{,b,d}-codex-review.md` — adversarial review history
+- `probe/releases/probe-v5{c,d,e,f}.tar.gz` — release artifacts
 
-## Critical mistake to avoid in future sessions
+**Phase 3 starts with PHASE3-PLAN.md.** Should be drafted post-compact.
+Suggested structure:
+1. Goal restatement (parry indicator: hue shift + audio cue at
+   parry-window-open frame)
+2. Phase 3.1: offset hunting for target_handle, animation_id, hit-event
+   flags. Probably a more focused v6 of the probe with arming on
+   specific events (lock-on toggle, hit taken).
+3. Phase 3.2: D3D12 hook for the visual cue (separate hook from
+   gameplay logic).
+4. Phase 3.3: state machine — multi-boss aware, lock-on aware,
+   PvE-only, boss-fights-only.
+5. Phase 3.4: audio cue + INI config.
+6. Test plan: parry tools (Parrying Dagger from Twin Maiden Husks at
+   Roundtable Hold, 1600 runes; or Buckler from Limgrave nomadic
+   merchant 1800 runes).
 
-**I (Claude) had Josh's empirical answer ("crashes only with probe loaded, none after rename") and tried to argue against it using formal minidump analysis.** That was wrong. Josh's pattern recognition from 5 hours of normal play vs 73 min of crashes is stronger evidence than a stack trace that doesn't show probe symbols. Heap corruption is detected on the wrong thread by design — that's its whole signature.
+## Resumption checklist for next session
 
-If a future session gets data that contradicts Josh's lived experience, **default to Josh's empirical read** unless I have a mechanism-level explanation that's MORE specific than "no probe symbols on crash stack."
+1. `cd /home/joshua.blattner/claude/elden-ring && git status` (should
+   be clean)
+2. `mount | grep station` (should show both mounts; auto-mount on
+   first access if needed)
+3. Confirm SSH service status with Josh — manual start, not always on
+4. If Josh says "go" → write `PHASE3-PLAN.md` (start with goal +
+   open questions; CEO/eng review pass via plan-reviewer subagent
+   before locking)
+5. If Josh says "test more first" → just sit on the probe; v5f works.
 
-## Plan for next session — v5 from minimal-invasion posture
+## Workflow notes preserved across compact
 
-**Core insight:** the probe's job is to discover correct offsets. We don't need 60Hz polling for that. We need careful, bounded sampling.
-
-### v5 design (proposed, not yet implemented)
-
-1. **Hotkey-triggered sampling.** Bind F11 (or similar). Player presses → probe samples once, writes ~10 lines to CSV, idles. Default behavior is dormant.
-2. **Drop the WCM dump entirely.** Was added in v4 specifically to enable offline analysis — but Josh's existing run-3 dump.bin already provides that data. We don't need to re-dump every game launch.
-3. **Drop the prio queue walk for now.** Until we've nailed the player chain, we shouldn't be aggressively walking other game state.
-4. **Single deref per hotkey press.** Read WCM. Read player slot. Read entity_id at +0x1E8. Log. Done. Maybe 5-10 reads total per press.
-5. **Audible/visual feedback at probe init** so Josh knows the probe is alive. DebugView banner is enough; no in-game UI.
-6. **Hard frame budget.** If sampling takes >1ms, abort. We never block the game thread.
-
-### v5 rollout plan
-
-1. Claude writes v5 source at `~/claude/elden-ring/probe/probe.cpp` with above constraints
-2. Claude dispatches Codex on adversarial review (writer-pairing rule per global memory)
-3. Claude commits + tarballs as `probe/releases/probe-v5.tar.gz`
-4. Claude SSHes to station, builds via MSBuild
-5. **Josh starts a fresh test session ONLY when he's ready** (no time pressure)
-6. Josh launches game, presses hotkey ~5 times during normal play, plays for 15-30 min
-7. **If game crashes within first 20 min:** stop, rename .dll back to .old, debrief
-8. **If game runs cleanly:** read CSV (will have ~5 sample blocks), see if entity_id at offset 0x1E8 is finally non-zero, decide next move
-
-### Offline work that doesn't require game launches
-
-The 131KB WCM memory dump from run-3 is sitting on the VM. We can:
-- Read it as raw bytes
-- Look for 64-bit values that look like heap pointers (high prefix `0x00007FF3...` or `0x00007FF4...`) at various offsets
-- Cross-reference with PostureBarMod's struct definitions (`archaeology-sources/posturebarmod/Source/Main/Hooking.hpp` shows `playerArray[0x4]` at `0x10EF8`)
-- Find the offset that matches a known-good player-chr-ins-shaped value
-- THEN ship a v6 with the corrected offset
-
-This is real progress that doesn't risk crashes.
-
-## Suggested next-session opening
-
-1. Read this HANDOFF
-2. Read `probe/runs/run-3-2026-05-06-2255-CT-v4-CRASH/README.md`
-3. Confirm Tailscale + SMB are still up: `mount | grep station`
-4. Confirm SSH service status with Josh (it's set to manual; he may have stopped it)
-5. **Start with offline WCM dump analysis** before considering any in-game test
-6. Discuss v5 design with Josh, get explicit signoff on the minimal-invasion approach, THEN write code
-
-## Open questions for Josh
-
-1. Is keeping our DLL renamed `.old` indefinitely OK while we plan v5? (Yes, almost certainly)
-2. Want to leave the GitHub repo private until v0.1.0 ships? (Discussed: yes, private for now)
-3. After we get v1 working, do you want a public release blog post / Reddit post? (Not yet decided)
-
-## Workflow notes
-
-- Build channel via SSH+MSBuild works. Do NOT regress to email-tarball workflow.
-- File access via SMB works. `/mnt/station-projects/` (RO), `/mnt/station-mods/` (RW for parry-tell-* files only).
-- Audit trail: every Claude write to mods folder is logged in Windows Event Viewer under user `claude`.
-- Kill switches for Josh are documented in email msg-id `4fb1ee91-2556-47f5-9693-b6d590cbaae8` (sent 2026-05-06 21:30 CT).
+- **No PostureBarMod conflict.** Josh doesn't run it. Coexistence with
+  it was a hypothetical concern; in his actual rig, slot 0 of
+  playerArray is uncontested.
+- **SSH service on station is manual-start.** Do not assume it's
+  running. Test with a `ssh ... echo SSH_OK` first.
+- **Build chain:** scp source → ssh MSBuild → SMB read DLL → cp to
+  mods folder. Toolset is v145. ~10s wall time.
+- **Codex MCP timeout** is shorter than Codex's actual runtime. If a
+  request times out at the MCP layer, codex itself usually keeps
+  running — `pgrep -af codex` to check before retrying.
+- **Codex's read-only sandbox can't write** to research/. Inline-content
+  responses get pasted into a Write tool call. This is fine.
+- **Critic plugin auto-fires** after every Write/Edit. Verdicts append
+  to tool result. Address before final summary per global protocol.
