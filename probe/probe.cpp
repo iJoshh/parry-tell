@@ -1,4 +1,4 @@
-// parry-tell-probe v5d — hook-based, F11-armed slot probe
+// parry-tell-probe v5e — hook-based, F11-armed slot probe
 //
 // ARCHITECTURE (CHANGED FROM v5c):
 //   v5c was a polling worker thread that read game memory on F11 edges.
@@ -69,6 +69,18 @@
 //   #5 (CSV blocks game thread): TryEnterCriticalSection everywhere;
 //      drop log line on contention rather than block the detour.
 //   #6 (init_failed regressed dead flag): removed.
+//
+// FIXES IN v5e (from v5d in-game test data, 2026-05-07):
+//   - Per-second hitch: dropped per-line fflush; CRT buffers writes
+//     and worker thread flushes once per second off the game thread.
+//   - GetChrInsFromHandle pass: was passing &handle (stack copy);
+//     now passes &chrIns->handle (live struct address) like
+//     PostureBarMod does. v5d data showed resolved == chrIns for
+//     every sample (indicating the function returned input unchanged).
+//   - Multi-offset probe: log canary fields at BOTH ChrIns layout
+//     (entity_id +0x1E8, block_id +0x38) AND PlayerIns layout
+//     (block_id +0x6D0, mapX +0x6C0, mapAngle +0x6CC) so the next
+//     test settles which struct playerArray[0] actually points at.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -95,7 +107,7 @@ static char g_csvPath[MAX_PATH] = {0};
 
 static void DebugBanner(const char* msg) {
     char buf[1024];
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "[parry-tell-probe v5d] %s\n", msg);
+    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "[parry-tell-probe v5e] %s\n", msg);
     OutputDebugStringA(buf);
 }
 
@@ -106,7 +118,7 @@ static void DebugFmt(const char* fmt, ...) {
     _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, ap);
     va_end(ap);
     char out[1100];
-    _snprintf_s(out, sizeof(out), _TRUNCATE, "[parry-tell-probe v5d] %s\n", buf);
+    _snprintf_s(out, sizeof(out), _TRUNCATE, "[parry-tell-probe v5e] %s\n", buf);
     OutputDebugStringA(out);
 }
 
@@ -132,7 +144,7 @@ static void CsvOpen() {
         if (sz == 0) {
             fprintf(g_csv, "ts_ms,event,detail\n");
         } else {
-            fprintf(g_csv, "# === session start v5d ===\n");
+            fprintf(g_csv, "# === session start v5e ===\n");
         }
         fflush(g_csv);
         g_csvReady.store(true);
@@ -141,16 +153,23 @@ static void CsvOpen() {
 
 // CSV writers use TryEnterCriticalSection — never blocks the caller.
 // Per Codex v5d #5: detour runs in game thread; we can't risk it
-// blocking on the F11 thread holding the CSV lock. Worst case is a
-// dropped log line under rare contention. Acceptable for diagnostics.
+// blocking on the F11 thread holding the CSV lock.
+//
+// v5e perf fix: dropped per-line fflush. v5d's per-second hitch was
+// caused by ~8 fflushes per sample (each one a synchronous disk
+// syscall, milliseconds on Windows). The CRT does its own buffering
+// (~4KB), so fprintf alone is fast. The CSV is flushed periodically
+// by a dedicated worker-thread flush loop and on session-end via
+// CsvFinalFlush. Worst case on hard crash is losing the last few
+// log lines, which is acceptable for diagnostics — we already lose
+// far more in a crash dump than in a stale CSV buffer.
 static void CsvLog(const char* event, const char* detail) {
     if (!g_csvReady.load() || !g_running.load()) return;
-    if (!TryEnterCriticalSection(&g_csvLock)) return;  // skip on contention
+    if (!TryEnterCriticalSection(&g_csvLock)) return;
     if (g_csv) {
         auto now = std::chrono::steady_clock::now().time_since_epoch();
         long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
         fprintf(g_csv, "%lld,%s,%s\n", ms, event, detail ? detail : "");
-        fflush(g_csv);
     }
     LeaveCriticalSection(&g_csvLock);
 }
@@ -165,6 +184,16 @@ static void CsvComment(const char* fmt, ...) {
     if (!TryEnterCriticalSection(&g_csvLock)) return;
     if (g_csv) {
         fprintf(g_csv, "# %s\n", buf);
+    }
+    LeaveCriticalSection(&g_csvLock);
+}
+
+// Periodic flush from the worker thread so we don't lose data over
+// long sessions without forcing the game thread to wait on disk.
+static void CsvPeriodicFlush() {
+    if (!g_csvReady.load() || !g_running.load()) return;
+    if (!TryEnterCriticalSection(&g_csvLock)) return;
+    if (g_csv) {
         fflush(g_csv);
     }
     LeaveCriticalSection(&g_csvLock);
@@ -174,7 +203,7 @@ static void CsvFinalFlush() {
     if (!g_csvReady.load()) return;
     EnterCriticalSection(&g_csvLock);
     if (g_csv) {
-        fprintf(g_csv, "# === session end v5d ===\n");
+        fprintf(g_csv, "# === session end v5e ===\n");
         fflush(g_csv);
     }
     LeaveCriticalSection(&g_csvLock);
@@ -455,7 +484,7 @@ static bool ResolveGameRefs() {
     DebugFmt("WCM ptr addr = 0x%016llX", (unsigned long long)wcmPtrAddr);
     DebugFmt("GetChrInsFromHandle = 0x%016llX", (unsigned long long)getFn);
     DebugFmt("UpdateUIBarStructs = 0x%016llX", (unsigned long long)uiFn);
-    CsvComment("v5d init: WCM=0x%016llX getFn=0x%016llX uiFn=0x%016llX",
+    CsvComment("v5e init: WCM=0x%016llX getFn=0x%016llX uiFn=0x%016llX",
                (unsigned long long)wcmPtrAddr,
                (unsigned long long)getFn,
                (unsigned long long)uiFn);
@@ -526,38 +555,66 @@ static void SampleOnce() {
             continue;
         }
 
+        // v5e fix: pass POINTER TO LIVE HANDLE FIELD, not pointer to our
+        // stack copy. PostureBarMod uses &(*playerArray[0])->handle —
+        // i.e. the address of the handle inside the live struct. Passing
+        // a stack-copy pointer made GetChrInsFromHandle return the input
+        // back unchanged in v5d (resolved == chrIns for every sample).
         void* resolved = nullptr;
         __try {
-            resolved = getFn(reinterpret_cast<void*>(wcm), &handle);
+            resolved = getFn(reinterpret_cast<void*>(wcm),
+                             reinterpret_cast<uint64_t*>(handleAddr));
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             resolved = nullptr;
         }
         uintptr_t resolvedAddr = reinterpret_cast<uintptr_t>(resolved);
 
-        uint32_t entityId = 0;
-        int      blockId  = 0;
-        int      chrType  = 0;
-        bool     readsOk  = false;
+        // v5e: probe MULTIPLE candidate offsets so we can identify the
+        // actual struct layout empirically. v5d data showed entity_id at
+        // +0x1E8 reads as 0 even when chain succeeds. TarnishedTool's
+        // PlayerInsOffsets has block at +0x6D0, mapX at +0x6C0, mapAngle
+        // at +0x6CC for 2.6.1 — values that change as Josh moves through
+        // the world. We log both ChrIns-shape and PlayerIns-shape canary
+        // fields so the next test session settles which struct
+        // playerArray[0] actually points at.
+        uint32_t entityId_1E8 = 0;
+        int      blockId_38   = 0;
+        int      chrType_64   = 0;
+        int      blockId_6D0  = 0;
+        float    mapX_6C0     = 0.0f;
+        float    mapAng_6CC   = 0.0f;
+        bool     readsOk      = false;
 
         if (resolved && LooksLikeUserPtr(resolvedAddr)) {
-            uintptr_t entAddr = resolvedAddr + Layout::CHR_INS_ENTITY_ID;
-            uintptr_t blkAddr = resolvedAddr + Layout::CHR_INS_BLOCK_ID;
-            uintptr_t typAddr = resolvedAddr + Layout::CHR_INS_CHR_TYPE;
+            uintptr_t e1E8 = resolvedAddr + 0x1E8;
+            uintptr_t b38  = resolvedAddr + 0x038;
+            uintptr_t t64  = resolvedAddr + 0x064;
+            uintptr_t b6D0 = resolvedAddr + 0x6D0;
+            uintptr_t mX   = resolvedAddr + 0x6C0;
+            uintptr_t mA   = resolvedAddr + 0x6CC;
 
-            bool a = LooksReadable<uint32_t>(entAddr) && SafeRead<uint32_t>(entAddr, &entityId);
-            bool b = LooksReadable<int>(blkAddr)      && SafeRead<int>(blkAddr, &blockId);
-            bool c = LooksReadable<int>(typAddr)      && SafeRead<int>(typAddr, &chrType);
-            readsOk = a && b && c;
+            bool a = LooksReadable<uint32_t>(e1E8) && SafeRead<uint32_t>(e1E8, &entityId_1E8);
+            bool b = LooksReadable<int>(b38)       && SafeRead<int>(b38,  &blockId_38);
+            bool c = LooksReadable<int>(t64)       && SafeRead<int>(t64,  &chrType_64);
+            bool d = LooksReadable<int>(b6D0)      && SafeRead<int>(b6D0, &blockId_6D0);
+            bool e = LooksReadable<float>(mX)      && SafeRead<float>(mX, &mapX_6C0);
+            bool f = LooksReadable<float>(mA)      && SafeRead<float>(mA, &mapAng_6CC);
+            readsOk = a && b && c && d && e && f;
         }
 
-        char detail[256];
+        char detail[384];
         _snprintf_s(detail, sizeof(detail), _TRUNCATE,
-            "slot=%d chrIns=0x%016llX handle=0x%016llX resolved=0x%016llX entity=0x%08X block=%d type=%d ok=%d",
+            "slot=%d chrIns=0x%016llX handle=0x%016llX resolved=0x%016llX "
+            "ChrIns[ent_1E8=0x%08X blk_38=%d typ_64=%d] "
+            "PlayerIns[blk_6D0=%d mapX_6C0=%.4f mapAng_6CC=%.4f] "
+            "ok=%d",
             slot,
             (unsigned long long)chrInsPtr,
             (unsigned long long)handle,
             (unsigned long long)resolvedAddr,
-            entityId, blockId, chrType, readsOk ? 1 : 0);
+            entityId_1E8, blockId_38, chrType_64,
+            blockId_6D0, mapX_6C0, mapAng_6CC,
+            readsOk ? 1 : 0);
         CsvLog("slot", detail);
     }
 
@@ -715,9 +772,13 @@ static DWORD WINAPI WorkerThread(LPVOID) {
         g_f11Thread = CreateThread(nullptr, 0, F11Thread, nullptr, 0, nullptr);
     }
 
-    // Worker thread idles; it does not need to do further work.
+    // Worker thread idles + periodic CSV flush. Flushes once per second
+    // so we don't lose log data over long sessions, but never blocks the
+    // game thread on disk I/O (the detour writes go straight into the
+    // CRT buffer — flush happens here, off-thread).
     while (g_running.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        CsvPeriodicFlush();
     }
 
     DebugBanner("worker thread exiting");
@@ -744,7 +805,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD reason, LPVOID) {
                 reinterpret_cast<LPCSTR>(&DllMain),
                 &pinned);
             if (!pinOk) {
-                DebugBanner("DLL_PROCESS_ATTACH (v5d) FAILED: cannot pin module; refusing to load");
+                DebugBanner("DLL_PROCESS_ATTACH (v5e) FAILED: cannot pin module; refusing to load");
                 return FALSE;
             }
             g_running.store(true);
@@ -756,7 +817,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD reason, LPVOID) {
             g_running.store(false);
             if (g_workerThread) { CloseHandle(g_workerThread); g_workerThread = nullptr; }
             if (g_f11Thread)    { CloseHandle(g_f11Thread);    g_f11Thread = nullptr; }
-            DebugBanner("DLL_PROCESS_DETACH (v5d) - safe-leak teardown");
+            DebugBanner("DLL_PROCESS_DETACH (v5e) - safe-leak teardown");
             break;
         }
     }
