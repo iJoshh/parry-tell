@@ -1,4 +1,4 @@
-// parry-tell-probe v5e — hook-based, F11-armed slot probe
+// parry-tell-probe v5f — hook-based, F11-armed slot probe
 //
 // ARCHITECTURE (CHANGED FROM v5c):
 //   v5c was a polling worker thread that read game memory on F11 edges.
@@ -81,6 +81,25 @@
 //     (entity_id +0x1E8, block_id +0x38) AND PlayerIns layout
 //     (block_id +0x6D0, mapX +0x6C0, mapAngle +0x6CC) so the next
 //     test settles which struct playerArray[0] actually points at.
+//
+// FIXES IN v5f (from v5e in-game test data, 2026-05-07):
+//   - Hitch persisted in v5e despite fflush removal. Root cause was
+//     ~30 VirtualQuery syscalls per sample (LooksReadable<T> +
+//     LooksLikeUserPtr called per pointer hop x 4 slots). VirtualQuery
+//     is a kernel transition, microseconds each. Fixed by introducing
+//     LooksLikeUserPtrFast (pure compute, no syscalls) for hot-path
+//     use; SEH wrapping in SafeRead<T> already catches actual faults
+//     cleanly. Slow VirtualQuery-backed variants retained for init-
+//     time signature scan validation.
+//
+// CONFIRMED IN v5e DATA:
+//   - Slot 0 IS the local player (mapX_6C0 changes as player walks).
+//   - playerArray[0] is a PlayerIns*, NOT a generic ChrIns*.
+//     Real fields are at PlayerIns offsets (block +0x6D0, mapX +0x6C0,
+//     mapAngle +0x6CC) — TarnishedTool's PlayerInsOffsets layout for
+//     2.6.1, NOT PostureBarMod's ChrIns layout. v6+ should drop the
+//     ChrIns offset probes (entity_id +0x1E8 etc.) since they are not
+//     the right layout for this slot.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -107,7 +126,7 @@ static char g_csvPath[MAX_PATH] = {0};
 
 static void DebugBanner(const char* msg) {
     char buf[1024];
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "[parry-tell-probe v5e] %s\n", msg);
+    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "[parry-tell-probe v5f] %s\n", msg);
     OutputDebugStringA(buf);
 }
 
@@ -118,7 +137,7 @@ static void DebugFmt(const char* fmt, ...) {
     _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, ap);
     va_end(ap);
     char out[1100];
-    _snprintf_s(out, sizeof(out), _TRUNCATE, "[parry-tell-probe v5e] %s\n", buf);
+    _snprintf_s(out, sizeof(out), _TRUNCATE, "[parry-tell-probe v5f] %s\n", buf);
     OutputDebugStringA(out);
 }
 
@@ -144,7 +163,7 @@ static void CsvOpen() {
         if (sz == 0) {
             fprintf(g_csv, "ts_ms,event,detail\n");
         } else {
-            fprintf(g_csv, "# === session start v5e ===\n");
+            fprintf(g_csv, "# === session start v5f ===\n");
         }
         fflush(g_csv);
         g_csvReady.store(true);
@@ -203,7 +222,7 @@ static void CsvFinalFlush() {
     if (!g_csvReady.load()) return;
     EnterCriticalSection(&g_csvLock);
     if (g_csv) {
-        fprintf(g_csv, "# === session end v5e ===\n");
+        fprintf(g_csv, "# === session end v5f ===\n");
         fflush(g_csv);
     }
     LeaveCriticalSection(&g_csvLock);
@@ -222,6 +241,9 @@ static bool SafeRead(uintptr_t addr, T* out) {
     }
 }
 
+// LooksReadable — slow path, uses VirtualQuery (kernel syscall ~µs).
+// Use for one-time checks: signature scan address, init-time
+// validation. NEVER call from the detour hot path.
 template<typename T>
 static bool LooksReadable(uintptr_t addr) {
     if (!addr) return false;
@@ -236,15 +258,32 @@ static bool LooksReadable(uintptr_t addr) {
     return (addr + sizeof(T)) <= regionEnd;
 }
 
+// LooksLikeUserPtr — slow path, uses VirtualQuery. Init-time only.
 static bool LooksLikeUserPtr(uintptr_t v) {
     if (v == 0) return false;
     if (v & 0x7) return false;
-    if ((v >> 47) != 0) return false;       // x86-64 user-mode VA cap
+    if ((v >> 47) != 0) return false;
     if (v < 0x10000ULL) return false;
     MEMORY_BASIC_INFORMATION mbi{};
     if (VirtualQuery(reinterpret_cast<LPCVOID>(v), &mbi, sizeof(mbi)) == 0) return false;
     if (mbi.State != MEM_COMMIT) return false;
     if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+    return true;
+}
+
+// LooksLikeUserPtrFast — pure compute, no syscalls. Use in the detour
+// hot path. Per v5e in-game data: VirtualQuery on the hot path causes
+// a per-second hitch (~30 syscalls per sample). SEH wrapping in
+// SafeRead<T> already catches real faults; the fast check here just
+// rules out obviously bogus values (null, sub-64KB, alignment-wrong,
+// non-canonical user-space). False positives (a "looks-good" value
+// that turns out unreadable) cleanly degrade to SafeRead returning
+// false.
+static inline bool LooksLikeUserPtrFast(uintptr_t v) {
+    if (v == 0) return false;
+    if (v & 0x7) return false;
+    if ((v >> 47) != 0) return false;
+    if (v < 0x10000ULL) return false;
     return true;
 }
 
@@ -484,7 +523,7 @@ static bool ResolveGameRefs() {
     DebugFmt("WCM ptr addr = 0x%016llX", (unsigned long long)wcmPtrAddr);
     DebugFmt("GetChrInsFromHandle = 0x%016llX", (unsigned long long)getFn);
     DebugFmt("UpdateUIBarStructs = 0x%016llX", (unsigned long long)uiFn);
-    CsvComment("v5e init: WCM=0x%016llX getFn=0x%016llX uiFn=0x%016llX",
+    CsvComment("v5f init: WCM=0x%016llX getFn=0x%016llX uiFn=0x%016llX",
                (unsigned long long)wcmPtrAddr,
                (unsigned long long)getFn,
                (unsigned long long)uiFn);
@@ -500,10 +539,14 @@ static void SampleOnce() {
     int seq = ++g_sampleSeq;
     CsvComment("--- sample %d begin (in-detour) ---", seq);
 
+    // v5f: hot path now uses LooksLikeUserPtrFast (pure compute) and
+    // raw SafeRead (SEH-wrapped). VirtualQuery is too expensive at 30+
+    // syscalls per sample on the game thread. SEH catches real faults
+    // cleanly; the fast pointer-shape check rules out obviously bogus
+    // values without entering the kernel.
     uintptr_t wcm = 0;
-    if (!LooksReadable<uintptr_t>(g_refs.wcmPtrAddr) ||
-        !SafeRead<uintptr_t>(g_refs.wcmPtrAddr, &wcm) ||
-        wcm == 0 || !LooksLikeUserPtr(wcm)) {
+    if (!SafeRead<uintptr_t>(g_refs.wcmPtrAddr, &wcm) ||
+        !LooksLikeUserPtrFast(wcm)) {
         CsvLog("sample_fail", "wcm read or shape failed");
         return;
     }
@@ -515,8 +558,7 @@ static void SampleOnce() {
         uintptr_t slotAddr = wcm + Layout::OFF_PLAYER_ARRAY + (slot * sizeof(uintptr_t));
 
         uintptr_t slotEntry = 0;
-        if (!LooksReadable<uintptr_t>(slotAddr) ||
-            !SafeRead<uintptr_t>(slotAddr, &slotEntry)) {
+        if (!SafeRead<uintptr_t>(slotAddr, &slotEntry)) {
             char buf[64]; _snprintf_s(buf, sizeof(buf), _TRUNCATE, "slot=%d read_fail", slot);
             CsvLog("slot", buf);
             continue;
@@ -526,7 +568,7 @@ static void SampleOnce() {
             CsvLog("slot", buf);
             continue;
         }
-        if (!LooksLikeUserPtr(slotEntry)) {
+        if (!LooksLikeUserPtrFast(slotEntry)) {
             char buf[128]; _snprintf_s(buf, sizeof(buf), _TRUNCATE,
                 "slot=%d entry=0x%016llX shape=invalid", slot, (unsigned long long)slotEntry);
             CsvLog("slot", buf);
@@ -534,9 +576,8 @@ static void SampleOnce() {
         }
 
         uintptr_t chrInsPtr = 0;
-        if (!LooksReadable<uintptr_t>(slotEntry) ||
-            !SafeRead<uintptr_t>(slotEntry, &chrInsPtr) ||
-            chrInsPtr == 0 || !LooksLikeUserPtr(chrInsPtr)) {
+        if (!SafeRead<uintptr_t>(slotEntry, &chrInsPtr) ||
+            !LooksLikeUserPtrFast(chrInsPtr)) {
             char buf[128]; _snprintf_s(buf, sizeof(buf), _TRUNCATE,
                 "slot=%d entry=0x%016llX deref_fail", slot, (unsigned long long)slotEntry);
             CsvLog("slot", buf);
@@ -545,8 +586,7 @@ static void SampleOnce() {
 
         uintptr_t handleAddr = chrInsPtr + Layout::CHR_INS_HANDLE;
         uint64_t handle = 0;
-        if (!LooksReadable<uint64_t>(handleAddr) ||
-            !SafeRead<uint64_t>(handleAddr, &handle) ||
+        if (!SafeRead<uint64_t>(handleAddr, &handle) ||
             handle == 0 || handle == UINT64_MAX) {
             char buf[160]; _snprintf_s(buf, sizeof(buf), _TRUNCATE,
                 "slot=%d chrIns=0x%016llX handle_invalid=0x%016llX",
@@ -585,7 +625,7 @@ static void SampleOnce() {
         float    mapAng_6CC   = 0.0f;
         bool     readsOk      = false;
 
-        if (resolved && LooksLikeUserPtr(resolvedAddr)) {
+        if (resolved && LooksLikeUserPtrFast(resolvedAddr)) {
             uintptr_t e1E8 = resolvedAddr + 0x1E8;
             uintptr_t b38  = resolvedAddr + 0x038;
             uintptr_t t64  = resolvedAddr + 0x064;
@@ -593,12 +633,12 @@ static void SampleOnce() {
             uintptr_t mX   = resolvedAddr + 0x6C0;
             uintptr_t mA   = resolvedAddr + 0x6CC;
 
-            bool a = LooksReadable<uint32_t>(e1E8) && SafeRead<uint32_t>(e1E8, &entityId_1E8);
-            bool b = LooksReadable<int>(b38)       && SafeRead<int>(b38,  &blockId_38);
-            bool c = LooksReadable<int>(t64)       && SafeRead<int>(t64,  &chrType_64);
-            bool d = LooksReadable<int>(b6D0)      && SafeRead<int>(b6D0, &blockId_6D0);
-            bool e = LooksReadable<float>(mX)      && SafeRead<float>(mX, &mapX_6C0);
-            bool f = LooksReadable<float>(mA)      && SafeRead<float>(mA, &mapAng_6CC);
+            bool a = SafeRead<uint32_t>(e1E8, &entityId_1E8);
+            bool b = SafeRead<int>(b38,  &blockId_38);
+            bool c = SafeRead<int>(t64,  &chrType_64);
+            bool d = SafeRead<int>(b6D0, &blockId_6D0);
+            bool e = SafeRead<float>(mX, &mapX_6C0);
+            bool f = SafeRead<float>(mA, &mapAng_6CC);
             readsOk = a && b && c && d && e && f;
         }
 
@@ -805,7 +845,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD reason, LPVOID) {
                 reinterpret_cast<LPCSTR>(&DllMain),
                 &pinned);
             if (!pinOk) {
-                DebugBanner("DLL_PROCESS_ATTACH (v5e) FAILED: cannot pin module; refusing to load");
+                DebugBanner("DLL_PROCESS_ATTACH (v5f) FAILED: cannot pin module; refusing to load");
                 return FALSE;
             }
             g_running.store(true);
@@ -817,7 +857,7 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD reason, LPVOID) {
             g_running.store(false);
             if (g_workerThread) { CloseHandle(g_workerThread); g_workerThread = nullptr; }
             if (g_f11Thread)    { CloseHandle(g_f11Thread);    g_f11Thread = nullptr; }
-            DebugBanner("DLL_PROCESS_DETACH (v5e) - safe-leak teardown");
+            DebugBanner("DLL_PROCESS_DETACH (v5f) - safe-leak teardown");
             break;
         }
     }
