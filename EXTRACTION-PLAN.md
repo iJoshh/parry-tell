@@ -1,19 +1,41 @@
 # Extraction Plan — One-and-Done Game-Data Pull
 
+**Updated 2026-05-07:** simplified handoff path now that SMB mounts exist. You
+drop the zip at a known Projects-share path; I read it directly off the
+mount. No GitHub LFS, no cloud share link.
+
 ## Purpose
 
-Run UXM Selective Unpacker + WitchyBND **once** against your Elden Ring install to extract every piece of game data we might want for the parry-tell mod (now and for plausible future versions). Goal: never have to do this again.
+Run UXM Selective Unpacker + WitchyBND **once** against your Elden Ring
+install to extract TAE event data for parryable boss attacks. Goal: never
+have to do this again.
 
-When complete, you `git push` the extracted data folder to me, then run Steam "Verify integrity of game files" to restore your install to vanilla so you can play live online without issues.
+After: I parse the data into `data/parry_data.json` (with version metadata
+so we can detect drift across patches). You run Steam file-verify to
+restore vanilla so live online + Seamless both work clean.
+
+## Disable probe before extraction
+
+Before you start UXM, rename the probe DLL so it doesn't load while UXM
+is touching game files:
+
+```powershell
+Rename-Item "C:\Program Files (x86)\Steam\steamapps\common\ELDENRING\Game\mods\parry-tell-probe.dll" "parry-tell-probe.dll.disabled"
+```
+
+(Or just rename it via Explorer — drop the `.dll` extension. EML skips
+anything that's not `.dll`.)
+
+I'll restore it when we move to Phase 3.1.
 
 ## Estimated total time
 
-- UXM install + first run: **~30 minutes** (mostly waiting for the unpack to finish)
-- WitchyBND install + extraction: **~30–45 minutes**
-- Zip + send: **~15 minutes**
-- Steam verify (after we're done): **~15–30 minutes**
+- Disable probe + UXM install + first run: **~30 minutes** (mostly waiting for unpack)
+- WitchyBND install + extraction: **~30-45 minutes**
+- Zip + drop on Projects share: **~5 minutes** (just `Move-Item` to the mount)
+- Steam verify (after I confirm receipt): **~15-30 minutes**
 
-**Total Josh time: ~2 hours active, plus background unpack/verify time.**
+**Total Josh time: ~90 min active, ~2 hours wall.**
 
 ---
 
@@ -151,33 +173,69 @@ This phase is where we pull the actual data we want.
 
 ✅ **Phase B complete when:** your `<EXTRACT_DIR>\` folder has unpacked content for every file in Tier 1 + 2, totaling ~3–6GB.
 
-### Phase C — Send back (15 min wall, 5 min active)
+### Phase C — Drop on Projects share (5 min)
 
-12. **Zip the extraction folder.** Right-click on `<EXTRACT_DIR>\` → Send to → Compressed (zipped) folder. ~1–2GB compressed.
+12. **Zip the extraction folder.** Right-click on `<EXTRACT_DIR>\` → Send to
+    → Compressed (zipped) folder. ~1-2GB compressed. Name it
+    `parry-tell-extraction-2026-05-XX.zip`.
 
-13. **Send back via the GitHub repo.** When the GitHub repo (`iJoshh/parry-tell`) exists from preflight step 0.2d, you'll commit and push the zip into a `data-extraction/` folder. I'll pull it on the Linux VM.
+13. **Move it to the Projects share** so I can read it from the VM:
 
-    **Or** — if the zip is too big for git (likely is — Git struggles with files >100MB), use a file transfer service:
-    - Drop in your Dropbox / Google Drive / OneDrive shared folder
-    - Tell me the share link in chat
+    ```powershell
+    Move-Item <EXTRACT_DIR>.zip "C:\Projects\elden-ring\extracted\parry-tell-extraction-2026-05-07.zip"
+    ```
 
-    **Don't email it. Don't try to paste it.** Just a zip + a link.
+    (Create the `C:\Projects\elden-ring\extracted\` folder if it doesn't
+    exist. The Projects share is read-only from my side, but you have
+    full write on the Windows side — `C:\Projects\` is yours.)
 
-✅ **Phase C complete when:** I've confirmed receipt of the zip on my end.
+14. **Tell me when it's there.** I'll see it via SMB at
+    `/mnt/station-projects/elden-ring/extracted/`. I'll confirm size +
+    file count + start parsing.
 
-### Phase D — Restore vanilla install (Josh, when we're done with all extraction work)
+✅ **Phase C complete when:** I confirm I can see the zip and start
+extracting.
 
-This step happens AFTER we've extracted everything we need and confirmed it's processed correctly. Probably a few days from now.
+### Phase C alt — if the zip is huge
 
-14. **Open Steam → Library → right-click Elden Ring → Properties → Local Files → Verify integrity of game files.**
+If `<EXTRACT_DIR>` is unexpectedly bigger than ~3GB (e.g., you grabbed
+Tier 3 too) and zipping takes forever, skip the zip step:
 
-15. Steam re-downloads any modified files, restoring to vanilla. **~15-30 minutes.**
+```powershell
+robocopy <EXTRACT_DIR> "C:\Projects\elden-ring\extracted\raw" /E /MT:8
+```
 
-16. **Confirm vanilla works:** launch ER through Steam normally (NOT through Seamless's `ersc_launcher.exe`). You should see EAC's splash screen. Confirm online matchmaking works (or just main menu loads). You're back to vanilla.
+I can read the unpacked tree directly. ~20% slower for me to parse but
+saves your zip-time.
 
-17. **Seamless still works for the mod** because Seamless intentionally bypasses EAC; UXM-modified-then-restored install is the same as never-UXM'd from Seamless's perspective.
+### Phase D — Restore vanilla install
 
-✅ **Phase D complete when:** Steam verify completes and ER launches normally with EAC.
+**Wait for me to confirm the data parsed cleanly before Phase D.** If
+parsing fails or I find a hole, I may want you to extract one more
+archive — easier if your install is still UXM'd.
+
+15. **I'll Telegram or email you "extraction parsed clean, safe to
+    file-verify."**
+
+16. **Steam → Library → right-click Elden Ring → Properties → Local Files
+    → Verify integrity of game files.**
+
+17. Steam re-downloads modified files, restoring to vanilla. **~15-30 min.**
+
+18. **Confirm vanilla works:** launch ER through Steam normally (NOT
+    through Seamless's `ersc_launcher.exe`). You should see EAC's splash
+    screen. Confirm online matchmaking works (or just main menu loads).
+    You're back to vanilla.
+
+19. **Re-enable the probe DLL** (if you want to keep using it for testing):
+    rename `parry-tell-probe.dll.disabled` back to `parry-tell-probe.dll`.
+
+20. **Seamless still works for the mod** because Seamless intentionally
+    bypasses EAC; UXM-modified-then-restored install is the same as
+    never-UXM'd from Seamless's perspective.
+
+✅ **Phase D complete when:** Steam verify completes, ER launches with
+EAC, and you've told me "vanilla restored."
 
 ---
 
@@ -216,14 +274,37 @@ If you have to abort extraction (Phase B fails on a specific file, your disk fil
 
 ## When to do this
 
-**Not right now.** This requires you to be at your Windows machine for ~2 hours.
+**Now is fine** — you said "ready for extraction when you are." Probe
+v5f is stable, MVP needs the data, nothing else is blocked on it.
 
-**Recommended sequencing:**
-1. First, do preflight 0.2 (~1-2 hours): VS install, Defender exclusion, hello-world DLL test, GitHub repo. We need that working before the build phase.
-2. Then this extraction (~2 hours). Can be a different day.
-3. Then Step 1 (probe DLL build + boss fight test) — needs preflight done; doesn't need extraction yet.
-4. Step 2 (production build) — this is when the extraction data becomes load-bearing.
+**Sequencing inside the session:**
+1. Disable probe DLL (~30 sec)
+2. UXM unpack (~30 min wall, 5 min active)
+3. WitchyBND batch-extract (~30-45 min wall, 20 min active)
+4. Zip + drop on Projects share (~5 min)
+5. Tell me. I parse + confirm. (you go do something else for ~30 min)
+6. After confirmation, Steam file-verify (~15-30 min wall, passive)
+7. Re-enable probe DLL if you want it back
 
-So you have flexibility. Extraction can happen anytime between now and Step 2.
+**~90 minutes of your active keyboard time.** The unpack/verify steps
+are passive — go grab dinner.
 
-**When you're ready to start, message me and I'll be on standby for any questions/errors that come up during the extraction process.**
+## Asks I'll need answered DURING the session (have phone handy)
+
+These are the only things I'll likely need from you mid-session, listed
+upfront so you can pre-empt:
+
+1. **Steam library path.** If your ER install is on D:\ or somewhere
+   non-default, paste the full path to `eldenring.exe`.
+2. **`oo2core_8_win64.dll` location.** WitchyBND will probably ask for
+   it. It lives next to `eldenring.exe` (`Game\oo2core_8_win64.dll`) —
+   copy it next to `WitchyBND.exe` if prompted.
+3. **Disk space confirm.** ~10GB free needed during extraction. If you
+   start at <15GB, free some up before Phase B.
+4. **Done signal.** When the zip lands at
+   `C:\Projects\elden-ring\extracted\` — message me. I'll start parsing.
+
+That's it. Everything else is pre-baked into this doc.
+
+**When you're ready, just say "starting extraction."** I'll watch the
+station-projects mount and confirm receipt the moment the zip lands.
