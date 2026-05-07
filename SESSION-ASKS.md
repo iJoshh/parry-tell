@@ -65,23 +65,14 @@ CSV file.
        if not already installed. Each scenario below saves to its OWN
        filename (`STATION-2A.log`, `STATION-2B.log`, etc.) — don't
        overwrite a single log; I need to read them as separate captures.
-- [ ] **Recommended bosses for testing — different locations for
-       different scenarios:**
-       - **For 2.A / 2.B / 2.C (no summons needed):** Crucible Knight
-         at Stormhill Evergaol. Reliable parryable kick, ~3min run from
-         grace. Evergaols block spirit ashes, but we don't need them
-         for these three.
-       - **For 2.D (REQUIRES summons):** Crucible Knight at Auriza
-         Hero's Grave (open boss room, summons enabled), OR Banished
-         Knight Oleg in Stormhill (NPC summon Roderika's Mimic-equivalent
-         can be triggered). Best bet: any non-Evergaol boss with a
-         summon pool nearby.
-       - **Backup that works for ALL four scenarios:** Tree Sentinel in
-         Limgrave (open world, summons enabled, predictable parryable
-         attacks, ~30 sec from Church of Elleh grace).
-- [ ] **Have spirit ashes equipped.** Mimic Tear preferred for 2.D; Lone
-       Wolves Ash works as backup. Evergaols block all summons — that's
-       why 2.D needs a non-Evergaol boss.
+- [ ] **Recommended boss for all four scenarios:** Crucible Knight at
+       Stormhill Evergaol. Reliable parryable kick, ~3 min from grace.
+       Note: Seamless Co-op removes the vanilla "no summons in
+       evergaols" restriction (Josh confirmed 2026-05-07), so spirit
+       ashes work fine here for 2.D. If you ever test outside Seamless,
+       switch 2.D to Tree Sentinel (Limgrave, open world).
+- [ ] **Have spirit ashes equipped.** Mimic Tear preferred for 2.D;
+       Lone Wolves Ash works as backup.
 - [ ] **Disable Steam overlay** (right-click ER in library → Properties
        → uncheck "Enable Steam Overlay") if you haven't already — it can
        interfere with hotkeys in some cases.
@@ -134,14 +125,12 @@ CSV file.
 
 ### 2.D — Target/Mimic filter (F12)
 
-**IMPORTANT:** must be a boss with summons ENABLED. Evergaols block
-spirit ashes. See "recommended bosses" — use Tree Sentinel (Limgrave) or
-Crucible Knight at Auriza Hero's Grave, NOT Stormhill Evergaol.
-
-1. Travel to a non-Evergaol boss with summons enabled
+1. Re-enter Crucible Knight evergaol (or whichever boss you used for
+   2.A-C — same one is fine, summons work in evergaols under Seamless)
 2. Engage the fight
-3. **Summon Mimic Tear** (Spirit Calling Bell + Mimic ash). If you don't
-   have Mimic, use Lone Wolves Ash or any humanoid summon that fights.
+3. **Summon Mimic Tear** (Spirit Calling Bell + Mimic ash). If you
+   don't have Mimic, use Lone Wolves Ash or any humanoid summon that
+   fights.
 3. F11 + F12 to arm group D
 4. Stand back. Let Mimic engage Crucible Knight first.
 5. Wait for boss to focus on Mimic (~10 sec)

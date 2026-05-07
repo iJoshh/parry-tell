@@ -1,129 +1,119 @@
 # parry-tell — HANDOFF
 
-**Last session:** 2026-05-07 morning, through compact at ~10:15 CT.
-**Status:** Phase 2 essentially complete. Probe works. Starting PHASE3-PLAN.md next.
+**Last session:** 2026-05-07 ~12:00 CT, through compact before TAE extraction.
+**Status:** Phase 3 plan locked. Josh approved layered ship strategy.
+EXTRACTION-PLAN refreshed for SMB workflow. SESSION-ASKS playbook written
+for all upcoming Phase 3 sessions. **Josh is ready to start extraction.**
 
 ## Where we are
 
-**Probe v5f is installed on station and working.** Hook-based, F11-armed,
-no crashes across multiple sessions. Production-quality scaffolding for
-Phase 3.
+- Probe v5f works (HEAD before this session's docs: `95c3e25`).
+- PHASE3-PLAN.md drafted, two adversarial review passes (CEO + eng) baked
+  in. Josh approved the layered ship strategy: MVP at week 1, full v1 at
+  week 4. Confidence 80% MVP / 70% full v1 / 95% v1 eventually. Josh said
+  he doesn't think it'll take 4 weeks but is fine breaking it into 4 parts.
+- HEAD (post-this-session-docs): `a76807c`, all pushed to GitHub.
 
-**v5f file:** `/mnt/station-mods/parry-tell-probe.dll`
-**v5f md5:** `3dc6b79c841bef0be0f4f6e376bb4973`
-**v5f source:** `probe/probe.cpp` (HEAD = `95c3e25`)
+## Immediate next action
 
-If a future session needs to disable the probe, rename
-`/mnt/station-mods/parry-tell-probe.dll` → `parry-tell-probe.dll.old`
-(strip the `.dll` extension so Mod Loader skips it).
+**Josh starts TAE extraction.** Doc: `EXTRACTION-PLAN.md`. Workflow:
+1. Disable probe v5f DLL (rename to `.disabled`)
+2. UXM unpack ER (~30 min wall, 5 min active)
+3. WitchyBND batch-extract `c*.anibnd.dcx` (~30-45 min wall, 20 min active)
+4. Zip the folder, drop at
+   `C:\Projects\elden-ring\extracted\parry-tell-extraction-2026-05-XX.zip`
+5. Tell Claude "done with extraction"
+6. Claude reads via SMB at `/mnt/station-projects/elden-ring/extracted/`,
+   parses, runs sentinel-fixture validation, messages "safe to file-verify"
+7. Josh runs Steam file-verify to restore vanilla
+8. Josh re-enables probe v5f if desired
 
-## What we know (from in-game v5e + v5f data)
+## Critical correction noted this session
 
-**Player chain (locked):**
-- WCM global resolved via signature `48 8B 05 ? ? ? ? 48 85 C0 74 0F 48 39 88` + RIP-relative deref
-- `WCM + 0x10EF8` → `ChrIns** playerArray[4]`
-- `playerArray[0]` is the local player
-- Two derefs (slotEntry → chrIns) + handle round-trip via
-  `GetChrInsFromHandle(world, &chrIns->handle)` gives a stable, canonical
-  ChrIns pointer that doesn't move for the entire session
+**Evergaols DO NOT block spirit summons under Seamless Co-op.** I had it
+backwards in the first draft of SESSION-ASKS.md (assumed vanilla rules).
+Josh corrected: Seamless removes the vanilla "no summons in evergaols"
+restriction, so Mimic Tear works at Stormhill Evergaol Crucible Knight.
+Stormhill Evergaol is the recommended boss for ALL FOUR Phase 3.1.A-D
+scenarios; only need to switch to Tree Sentinel if testing outside
+Seamless. Already fixed in SESSION-ASKS.md.
 
-**Confirmed playerArray[0] is a `PlayerIns`, NOT a generic `ChrIns`:**
-- mapX at chrIns+0x6C0 (float, world coord X) — confirmed by walking and seeing values change smoothly
-- mapAngle at chrIns+0x6CC (float, radians, -π..+π) — confirmed
-- handle at chrIns+0x8 (uint64_t) — confirmed stable
-- blockId at chrIns+0x6D0 — TarnishedTool says this; in our data it's
-  NOT actually blockId, returns a few float-ish constants. **Offset is
-  wrong for 2.6.1, OR this isn't blockId.** Doesn't matter for Phase 3.
-- Generic ChrIns offsets (entity_id +0x1E8, blockId +0x38) DO NOT APPLY
-  to this slot. Don't use them.
+## What needs to happen post-compact
 
-**Hook architecture:**
-- Hook target: `UpdateUIBarStructs` (game's per-frame UI update fn)
-- Detour signature: `void(uintptr_t moveMapStep, uintptr_t time)` —
-  must match exactly, two args
-- Detour calls SampleOnce() iff armed AND >=1s since last (CAS-gated),
-  then chains to original
-- F11 toggles `g_armed` from a separate watcher thread (zero game-memory
-  reads from that thread)
+When Claude resumes (after Josh's compact):
 
-**Module pinned** via `GetModuleHandleEx(PIN | FROM_ADDRESS)` — cannot be
-unloaded mid-session.
+1. `mount | grep station` — confirm SMB mounts live
+2. `ls /mnt/station-projects/elden-ring/extracted/` — check if zip arrived
+3. If zip not there yet: tell Josh "ready when you start extraction"
+4. If zip IS there:
+   - Read `EXTRACTION-PLAN.md` Phase D for the parsing checklist
+   - Unzip locally (`/tmp/parry-extraction/` is fine)
+   - Walk every `*.tae.xml` file
+   - Build `data/parry_data.json` with `_meta` block:
+     ```json
+     "_meta": {
+       "game_version": "2.6.1.0",
+       "extracted_at": "<from zip mtime>",
+       "parser_version": "1.0.0",
+       "extraction_method": "UXM + WitchyBND",
+       "archive_sha256": { ... }
+     }
+     ```
+   - Run sentinel-fixture validation: pick a known-stable animation ID
+     (Crucible Knight idle stance), confirm it appears in extracted data
+     with plausible frame data
+   - If sentinel passes: message Josh "extraction parsed clean, safe to
+     file-verify"
+   - If sentinel fails: walk the 3-step remediation branch from
+     PHASE3-PLAN.md Phase 3.0 (version check, archive hash check,
+     escalate to soulstruct if format drift)
 
-**Performance:**
-- v5d/v5e had a per-second hitch caused by ~30 VirtualQuery syscalls per
-  sample on the game thread.
-- v5f introduced `LooksLikeUserPtrFast` (pure compute) for hot path; SEH
-  catches real faults via SafeRead<T>. Hitch is gone.
-- Slow VirtualQuery-backed `LooksReadable<T>` and `LooksLikeUserPtr` are
-  retained for init-time use only (sig scan, RIP deref).
+## Key file map
 
-## What we DO NOT know (open for Phase 3)
+- `PHASE3-PLAN.md` — 536-line build plan, status: draft, awaiting Josh
+  signoff (Josh has approved verbally; status flip is the ceremonial
+  acknowledgment that triggers Phase 3.0 start)
+- `EXTRACTION-PLAN.md` — refreshed for SMB workflow, ready to follow
+- `SESSION-ASKS.md` — pre-batched playbook for all 4 upcoming sessions
+  (extraction, probe v6, co-op, hue smoke test)
+- `research/phase3-{architecture,offsets,ceo-review,eng-review}-codex.md`
+  — research artifacts that fed the plan
+- `probe/probe.cpp` — v5f source (HEAD `95c3e25`)
+- `/mnt/station-mods/parry-tell-probe.dll` — installed v5f, currently
+  active. Josh will rename to `.disabled` before extraction.
 
-- **Target handle offset.** When you lock onto an enemy, where does your
-  PlayerIns store the target? Phase 3.1 needs to find this — likely via
-  hit-region memory diff during lock-on/unlock cycles.
-- **Animation state offsets.** What field signals "I am being attacked
-  by a parryable attack right now"? This is the actually-hard problem
-  for the parry-tell mod. Likely lives off the chrModuleBag pointer at
-  +0x190 (TarnishedTool) — but THAT offset is the generic ChrIns
-  layout, which may or may not apply via the PlayerIns wrapper.
-- **HP / stagger offsets** if we want to make the cue smarter (don't
-  fire while in iframes / dead).
-- **D3D12 hook target** for the visual cue (screen-edge hue). We've
-  been hooking gameplay logic; visual rendering needs a different hook.
+## What survives across compact
 
-## Phase 2 → Phase 3 transition
+All the workflow rules from the prior HANDOFF.md still apply. Specifically:
 
-**Phase 2 deliverables (all in repo):**
-- `probe/probe.cpp` — production-quality Phase 2 probe
-- `probe/vendor/MinHook/` — vendored MinHook (BSD-2)
-- `probe/probe.vcxproj` — builds with v145 toolset on station
-- `research/SYNTHESIS.md` — Phase 2 research synthesis
-- `research/phase2-research-{claude,codex}.md` — parallel blind reads
-- `research/v5{,b,d}-codex-review.md` — adversarial review history
-- `probe/releases/probe-v5{c,d,e,f}.tar.gz` — release artifacts
+- **Build chain:** scp source → ssh MSBuild → SMB read DLL → cp to mods.
+  Toolset v145.
+- **SSH service is manual-start.** Test before assuming.
+- **No PostureBarMod conflict.** Josh doesn't run it.
+- **Codex MCP timeout** is shorter than Codex's actual runtime.
+- **Critic plugin auto-fires** after every Write/Edit. Verdicts append to
+  tool result. Address before final summary per global protocol.
+- **Decision: same-attack replay handled via animTime-rewind detection,**
+  not animId change alone. State machine is handle-keyed not slot-keyed.
+- **Animation time read confidence is medium, not high.** First-try
+  +0x24; fallback is TarnishedTool's lock-target code-cave hook (NOT
+  raw frame counting — eng review rejected that as not FPS-stable).
 
-**Phase 3 starts with PHASE3-PLAN.md.** Should be drafted post-compact.
-Suggested structure:
-1. Goal restatement (parry indicator: hue shift + audio cue at
-   parry-window-open frame)
-2. Phase 3.1: offset hunting for target_handle, animation_id, hit-event
-   flags. Probably a more focused v6 of the probe with arming on
-   specific events (lock-on toggle, hit taken).
-3. Phase 3.2: D3D12 hook for the visual cue (separate hook from
-   gameplay logic).
-4. Phase 3.3: state machine — multi-boss aware, lock-on aware,
-   PvE-only, boss-fights-only.
-5. Phase 3.4: audio cue + INI config.
-6. Test plan: parry tools (Parrying Dagger from Twin Maiden Husks at
-   Roundtable Hold, 1600 runes; or Buckler from Limgrave nomadic
-   merchant 1800 runes).
+## Open questions Josh hasn't answered yet
 
-## Resumption checklist for next session
+(Not blocking extraction; can answer anytime)
 
-1. `cd /home/joshua.blattner/claude/elden-ring && git status` (should
-   be clean)
-2. `mount | grep station` (should show both mounts; auto-mount on
-   first access if needed)
-3. Confirm SSH service status with Josh — manual start, not always on
-4. If Josh says "go" → write `PHASE3-PLAN.md` (start with goal +
-   open questions; CEO/eng review pass via plan-reviewer subagent
-   before locking)
-5. If Josh says "test more first" → just sit on the probe; v5f works.
+1. Co-op friend availability for Session 3.B (target validation, after
+   L1 ships) — Josh said "I'll play with friends again over the next
+   couple nights" so this should resolve naturally
+2. Session 3.A (Seamless guest slot probe with v5f) — bonus mode, Josh
+   can run during any co-op session this week, ~10 min extra
 
-## Workflow notes preserved across compact
+## Confidence reminder
 
-- **No PostureBarMod conflict.** Josh doesn't run it. Coexistence with
-  it was a hypothetical concern; in his actual rig, slot 0 of
-  playerArray is uncontested.
-- **SSH service on station is manual-start.** Do not assume it's
-  running. Test with a `ssh ... echo SSH_OK` first.
-- **Build chain:** scp source → ssh MSBuild → SMB read DLL → cp to
-  mods folder. Toolset is v145. ~10s wall time.
-- **Codex MCP timeout** is shorter than Codex's actual runtime. If a
-  request times out at the MCP layer, codex itself usually keeps
-  running — `pgrep -af codex` to check before retrying.
-- **Codex's read-only sandbox can't write** to research/. Inline-content
-  responses get pasted into a Write tool call. This is fine.
-- **Critic plugin auto-fires** after every Write/Edit. Verdicts append
-  to tool result. Address before final summary per global protocol.
+- MVP audio-only by 2026-05-14: 80%
+- Full v1 by 2026-06-04: 70%
+- v1 ships eventually: 95%
+
+Josh said he expects faster than 4 weeks; not worth re-quoting upward
+without data. Layered ship gives him visible progress weekly regardless.
