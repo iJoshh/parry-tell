@@ -164,7 +164,7 @@ assumes slot 0; we've only verified solo so far.
 
 **Setup:**
 - [ ] Re-enable probe v5f if disabled. PowerShell:
-       `Rename-Item "C:\Program Files (x86)\Steam\steamapps\common\ELDENRING\Game\mods\parry-tell-probe.dll.disabled" "parry-tell-probe.dll"`
+       `Rename-Item "C:\Program Files (x86)\Steam\steamapps\common\ELDEN RING\Game\mods\parry-tell-probe.dll.disabled" "parry-tell-probe.dll"`
        Or via Explorer: rename to add the `.dll` back.
 - [ ] Have DebugView running, capture-on
 - [ ] Friend launches ER via Seamless as host. You join as guest.

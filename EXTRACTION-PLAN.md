@@ -20,7 +20,13 @@ Before you start UXM, rename the probe DLL so it doesn't load while UXM
 is touching game files:
 
 ```powershell
-Rename-Item "C:\Program Files (x86)\Steam\steamapps\common\ELDENRING\Game\mods\parry-tell-probe.dll" "parry-tell-probe.dll.disabled"
+Rename-Item "C:\Program Files (x86)\Steam\steamapps\common\ELDEN RING\Game\mods\parry-tell-probe.dll" "parry-tell-probe.dll.disabled"
+
+# Verified install layout (2026-05-07):
+#   eldenring.exe              87 MB   2025-08-21 (Seamless-patched, in-place)
+#   ersc_launcher.exe          175 KB  2024-06-28 (Seamless 1.7.x era — older
+#                                                  but TAE data is independent)
+#   start_protected_game.exe   3.9 MB  2024-06-27 (EAC stub, unused under Seamless)
 ```
 
 (Or just rename it via Explorer — drop the `.dll` extension. EML skips
@@ -68,7 +74,7 @@ I'll restore it when we move to Phase 3.1.
 2. **Run UXM.exe.** It opens a small UI.
 
 3. **Point it at your ER executable.** Click "Browse" and navigate to:
-   `C:\Program Files (x86)\Steam\steamapps\common\ELDENRING\Game\eldenring.exe`
+   `C:\Program Files (x86)\Steam\steamapps\common\ELDEN RING\Game\eldenring.exe`
    (Adjust if your Steam library is on a different drive.)
 
 4. **Click "Unpack."** UXM will decrypt the game archives. This takes 15–30 minutes depending on your disk speed. You'll see a progress bar.
