@@ -11,8 +11,11 @@ Active plan: `PHASE1-PLAN.md`. Handoff: `HANDOFF.md`. Long-form research:
 
 ## Windows file access (added 2026-05-06)
 
-Tailscale mesh is set up. `station` (Josh's Windows dev box, `100.110.26.9`)
-exposes two SMB shares to this VM (`codeserver-vm`, `100.71.88.94`):
+Tailscale mesh is set up. The Windows dev box (`station` in the tailnet)
+exposes two SMB shares to this VM (`codeserver-vm` in the tailnet). IPs and
+credentials live outside the repo (see local notes / shell environment).
+Resolve hostnames via `tailscale status` at runtime — never hardcode IPs
+in the repo.
 
 - **`Projects` (read-only)** — mounted at `/mnt/station-projects/`. Maps to
   `C:\Projects\` on Windows. Used for reading probe source, builds, logs,
@@ -21,11 +24,10 @@ exposes two SMB shares to this VM (`codeserver-vm`, `100.71.88.94`):
   Elden Ring `Game\mods\` folder. Used for swapping in fresh probe DLLs,
   cleaning up stale CSVs between test runs, reading the live CSV.
 
-Credentials: `/etc/cifs-credentials-station` (root, mode 600). Account is
-a Windows local user named `claude`, standard-user (no admin), mapped to
-read-only or read-write per share. Tailscale auth is identity-bound to
-Josh's `iJoshh@github` tailnet — losing the tailnet credential means losing
-network access entirely.
+Credentials live in a root-only file outside the repo (mode 600). Account is
+a Windows local user (standard-user, no admin) mapped to read-only or
+read-write per share. Tailscale auth is identity-bound — losing the tailnet
+credential means losing network access entirely.
 
 ### What Claude is allowed to do without asking
 
