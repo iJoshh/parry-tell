@@ -1,0 +1,21 @@
+# Build outputs (not on this side, but just in case)
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+*.user
+
+# Cloned upstream sources for reference
+.archaeology-sources/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tarballs are intentionally committed under probe/releases/
+# Logs/CSVs are intentionally committed under probe/runs/
