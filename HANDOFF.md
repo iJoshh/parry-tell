@@ -1,188 +1,209 @@
 # parry-tell — HANDOFF
 
-**Last session:** 2026-05-07, ~16:15 CT. Phase 3 Session 1 (TAE extraction)
-COMPLETE. Compacting before Session 1.5 (parsing).
-**Status:** All 807 ER character anibnds extracted. 64,385 anim-*.xml files
-staged on Projects share. Ready for VM-side parsing work.
+**Last session:** 2026-05-07, ~21:00 CT. Phase 3 Step 0 (TAE parser +
+database) COMPLETE. Ready for Phase 3 Step 1 (probe v6 design + MVP audio
+cue plumbing).
 
 ## Where we are
 
-- **Extraction done.** 807/807 anibnds (100% success, 0 failures in final run).
-- **Data location for parsing:** `/mnt/station-projects/elden-ring/chr-extracted/`
-  - 807 top-level dirs, one per ER character (named `c{NNNN}[_variant]-anibnd-dcx-wanibnd/`)
-  - 106,493 files / 2.51 GB total
-  - 64,385 `anim-*.xml` files (the actual TAE event-track data we came for)
-  - Each character dir contains: `_witchy-anibnd4.xml` (binder manifest) + a tree
-    of TAE XML files. Two layouts observed:
-    - **Boss layout** (most c2xxx-c8xxx): `{outDir}/tae/{cNNNN}-tae/anim-NNNNNN.xml`
-    - **Player layout** (c0000 family): `{outDir}/INTERROOT_win64/chr/c0000/tae/{a00,a01,...}-tae/anim-NNNNNN.xml`
-  - `hkx_compendium/` and `Model/` subdirs were excluded during copy (skeleton
-    physics + mesh data, not relevant to parry-window detection).
-- **Sample anim XML head** (verified parses as valid):
-    ```xml
-    <?xml version="1.0" encoding="utf-8"?>
-    <anim>
-      <name>a000_000000.hkt</name>
-      <header>...</header>
-      <events>...</events>  <!-- THIS is what we care about -->
-    </anim>
-    ```
+### What's locked and committed (this session)
 
-## Immediate next action — parsing
+- ✅ **TAE event-type investigation** — HIGH-confidence verdict that
+  `ChrActionFlag FlagType=5` is the canonical "this character is
+  parryable right now" marker. Two independent paths converged
+  (Codex web research + my coexistence test). Full report:
+  `research/phase3-tae-investigation-codex.md`.
+- ✅ **Parser source** — `tools/parse_taes.py` (621 lines, stdlib only,
+  workers=32 parallel, fixture+single-char sentinels, ASCII-only).
+  Codex parser-build-001 wrote it; gpt-5.5, ~2h38min wall, 195K tokens.
+- ✅ **Parry database** — `data/parry_data.json` (31 MB), 64,385 anims
+  scanned, 0 parse failures, 6,738 parry windows / 25,014 attack
+  behaviors / 10,608 bullet behaviors / 97,163 future-proofing
+  ChrActionFlag events. 107 characters have parry data.
+- ✅ **Sample fixtures** — `data/sample-fixtures/` (3 files, ~50 KB)
+  for parser unit tests without needing the SMB mount.
+- ✅ Repo restructure: research/ holds investigations, data/ holds
+  the database + fixtures, tools/ holds the parser.
+- ✅ All committed + pushed: latest `d43f0fb feat: TAE parser +
+  parry_data.json database`.
 
-Goal: produce `data/parry_data.json` at `/home/joshua.blattner/claude/elden-ring/data/parry_data.json`
-with `_meta` block per PHASE3-PLAN.md, then run sentinel-fixture validation.
+### Notable findings worth remembering
 
-### What to extract from each anim XML
+1. **Player (c0000) DOES carry FlagType=5 events** — 4,116 of them.
+   My earlier sampling-based "zero" check was wrong. Semantically:
+   when the player does certain attacks (kicks, some weapon arts),
+   those moves are parryable by enemies. Player anims correctly carry
+   FlagType=5 on those moves. The semantic is symmetric.
 
-The `<events>` block contains TAE event tracks. Per Phase 2 research
-(`research/phase3-offsets-codex.md`), the events relevant to parry detection are:
-- `InvokeParryHitback` / `InvokeParry*` event types — these mark the parry
-  window
-- Event start/end frame indices (or time, normalized to seconds)
+2. **WitchyBND output layout varies by character.** Two patterns:
+   - Nested: `cNNNN-anibnd-dcx-wanibnd/INTERROOT_win64/chr/cNNNN/tae/cNNNN-tae/anim-*.xml`
+   - Flat: `cNNNN-anibnd-dcx-wanibnd/tae/cNNNN-tae/anim-*.xml`
+   Recursive `**/anim-*.xml` glob handles both. The parser does this.
 
-For each event we want, capture: animId (filename), event type, start time,
-end time, character ID (from parent dir name).
+3. **520 character dirs have zero anim XMLs.** Expected — these are
+   auxiliary skeleton/blendshape binders (`cNNNN_aXX_hi`, etc).
+   `_witchy-anibnd4.xml` marker is the binder-success signal, not
+   anim count.
 
-### Sentinel-fixture validation
+4. **Multiple files often map to the same `(character_id, animation_id)`.**
+   For c4100, 569 files condensed to 220 unique animation_ids
+   (~2.6x). This is correct dedup behavior — the same logical anim
+   exists in multiple LOD binders. The parser merges events instead
+   of overwriting, so all 31 c4100 parry windows are preserved.
 
-Pick a known-stable boss whose parry window is documented in community wikis
-(Crucible Knight kick / `c4100_a000_000040` is a strong candidate — has the
-canonical kick parry and is well-documented). Confirm the parsed data shows
-a parry window in approximately the right frames (~12-20f at 30fps based on
-SoulsModding wiki references).
+5. **5 anomalies in the data** — parry windows >0.9s (normal is
+   0.0667s = 2 frames @ 30fps):
+   - c3251 a000_003012: 1.7s window
+   - c6251 a000_003012: 1.7s window
+   - c4370 a001_003010: 1.07s window
+   - c5650 a001_003010: 1.07s window
+   - c3660 a001_003011: 0.9s window
+   Likely intentional design (charged attacks have wider parry windows?).
+   Not blocking. Worth a closer look during MVP audio-cue testing —
+   if the cue feels off on those bosses specifically, this is the
+   first place to check.
 
-### Required `_meta` block (per PHASE3-PLAN.md)
+6. **gpt-5.5 (Codex) self-improves on long tasks.** The first
+   parser run had no progress logging, went silent for ~30 min,
+   Codex diagnosed his own visibility problem and rewrote the
+   parser to add progress lines. Mature behavior. The current
+   parser has progress logging built in and runs through
+   discovery → workers in clearly-marked phases.
 
-```json
-"_meta": {
-  "game_version": "2.6.1.0",
-  "extracted_at": "<from chr-extracted dir mtime>",
-  "parser_version": "1.0.0",
-  "extraction_method": "UXM Selective Unpack 2.4.2 + WitchyBND v3.0.0.1",
-  "archive_sha256": { ... <hashes of source .anibnd.dcx if available> }
-}
-```
+### Disk hygiene done this session
 
-The `archive_sha256` field is harder now that source .dcx files weren't copied
-to the share — they're still on Josh's `C:\` install. If we want hashes, I'd
-need to SSH-list them. Lower priority than getting the parser working.
+- Freed 96 GB by deleting two stale `/tmp/` files: an old tee'd
+  opencode-tail.log (49 GB, 5 days stale) and a runaway
+  opencode-telegram session scratch dir (49 GB, 11 days stale).
+  VM disk now at 46% used, 106 GB free. Both deletions were
+  verified safe before action.
+
+### Workflow gotchas to remember (across sessions)
+
+- **SMB perf is brutal.** 51 min for a full corpus parse over the
+  station Projects share. Per-file metadata roundtrips dominate
+  (~50ms/file). Local-mirror would be ~1 min total. The reason we
+  haven't moved chr-extracted local: it's 2.5 GB and the SMB→local
+  copy is ALSO bottlenecked by the same SMB latency (we measured
+  ~5 GB/hour, so a full copy would take ~30 min even). Worth doing
+  if we expect to re-run the parser; not worth doing if this
+  parry_data.json is final.
+- **opencode `Bash` tool truncation killed several investigation
+  passes.** When a process tree contains the full Codex prompt as
+  argv, `ps -ef --forest` and `pgrep -af` produce massive blobs
+  (~200 KB each) that flood the context. Avoid those flags when
+  Codex is running; use `ps -p PID -o pid,etime,stat`.
+- **`codex exec` vs `codex-mcp-server`.** This session, we
+  bypassed the npm-wrapper MCP and called `codex exec` directly
+  via Bash with fire-and-forget. Way better — non-blocking, real
+  exit codes, can dispatch and do parallel work. Pattern:
+  `nohup codex exec -s workspace-write --skip-git-repo-check -C $PWD
+  --output-last-message $RESULT_FILE "$(cat $PROMPT)" > $LOG 2>&1 &`
+  See `research/phase3-tae-investigation-prompt.md` and
+  `research/phase3-parser-build-prompt.md` for the dispatch shape.
+- **opencode MCP timeout bumped from 10 min → 30 min** for future
+  Codex MCP calls. `~/.config/opencode/opencode.json` line 124,
+  `mcp.codex.timeout: 1800000`.
+
+## Open questions / followups (not blocking)
+
+1. **`.gitignore` parser:** the original .gitignore had patterns
+   like `data/chr-extracted/` to exclude the 2.5 GB raw extraction.
+   Still correct. We currently have NO local-mirror; if a future
+   session does `cp -r /mnt/station-projects/elden-ring/chr-extracted
+   ~/claude/elden-ring/data/raw/` for parser iteration speed, the
+   gitignore protects against accidentally committing it.
+
+2. **Use native `codex mcp-server` instead of community npm wrapper.**
+   Currently in `~/.config/opencode/opencode.json`. Codex 0.128.0
+   ships its own `mcp-server` subcommand. Migration is on the
+   "should fix later" list — bumped to TODO in this session.
+
+3. **Hyperarmor sentinel** — `FlagType=24` ("Super Armor"). MEDIUM
+   confidence per investigation report. Need hands-on validation
+   against a known stagger-resistant boss attack when L2 hue work
+   begins. Database has 24-marker events extracted, just need to
+   confirm the windows match in-game behavior.
+
+4. **5 anomalies** — investigate when/if MVP cue testing shows
+   weirdness on those specific bosses (c3251, c6251, c4370, c5650,
+   c3660).
+
+## Immediate next action
+
+Phase 3 Step 1: probe v6 design + first MVP audio-cue plumbing.
+Per PHASE3-PLAN.md and SESSION-ASKS.md, this means:
+
+1. Probe v6 = 4 hotkey-armed sample groups for offset hunting
+   (Phase 3.1 in PHASE3-PLAN). Validates the +0x24 animation-time
+   chain that's currently MEDIUM-confidence.
+2. After probe v6 proves the offsets, MVP DLL development can
+   begin: read animation_id + animation_time at runtime, look up
+   parry windows in `data/parry_data.json`, fire `PlaySoundW` cue
+   when window opens.
+3. Ship target for MVP: `v0.1.0-alpha`, audio-only, week 1 of
+   layered ship strategy.
+
+SESSION-ASKS.md Session 2 is the playbook for probe v6 design.
 
 ## Key file map
 
-### On VM (`/home/joshua.blattner/claude/elden-ring/`)
-- `PHASE3-PLAN.md` — production build plan (status: draft, awaiting Josh
-  signoff). Ship strategy: MVP at week 1, full v1 at week 4.
-- `EXTRACTION-PLAN.md` — extraction playbook (now complete).
-- `SESSION-ASKS.md` — pre-batched playbook for upcoming sessions (Session 2
-  is probe v6 multi-target offset hunt; not started yet).
-- `HANDOFF.md` — this file.
-- `research/phase3-architecture-codex.md` — D3D12/audio/state machine.
-- `research/phase3-offsets-codex.md` — pointer chains for 5 fields.
-- `research/phase3-{ceo,eng}-review.md` — adversarial review history.
-- `probe/probe.cpp` — v5f source, ~860 lines. Working, currently disabled on
-  station.
+### Top-level docs (VM, `/home/joshua.blattner/claude/elden-ring/`)
 
-### On Projects share (`/mnt/station-projects/elden-ring/`)
-- `chr-extracted/` — **THE INPUT FOR PARSING.** 807 character dirs.
-- `extracted-tae-batch.log` — extraction batch log. Final: `Total: 807 |
-  Processed: 574 | Skipped: 233 | Failed: 0 | Wall: 16.2 min`.
-- `chr-copy.log` — robocopy log (mostly empty since `/LOG+` was buggy then
-  fixed).
+- `CLAUDE.md` — project conventions, SMB workflow rules, safety boundaries
+- `PHASE1-PLAN.md` — original product spec
+- `PHASE3-PLAN.md` — production build plan (status: draft awaiting Josh signoff)
+- `EXTRACTION-PLAN.md` — TAE extraction playbook (now complete)
+- `SESSION-ASKS.md` — pre-batched playbook for upcoming sessions
+- `HANDOFF.md` — this file
 
-### Tools on station (in case of re-extraction need)
-- `\\localhost\Projects\tools\UXM\` — UXM Selective Unpack 2.4.2
-- `\\localhost\Projects\tools\WitchyBND\` — WitchyBND v3.0.0.1
-- `\\localhost\Projects\tools\README.md` — install manifest with SHA256s
+### Research (`research/`)
 
-### Scripts on station (for re-extraction or post-mortem)
-- `C:\Users\claude\witchy-batch-v4.ps1` — final working batch script
-- `C:\Users\claude\witchy-press-enter-helper.ps1` — Enter-presser helper
-- (Older: `witchy-batch.ps1`, `witchy-batch-v2.ps1`, `witchy-batch-v3.ps1` —
-  superseded; ignore)
+- `SYNTHESIS.md` — Phase 2 research synthesis
+- `phase3-architecture-codex.md` — D3D12, audio, state machine
+- `phase3-offsets-codex.md` — 5 offset chains with citations
+- `phase3-ceo-review.md` — CEO/scope review
+- `phase3-eng-review.md` — Eng correctness review
+- **`phase3-tae-investigation-prompt.md`** — Codex semantic-investigation prompt
+- **`phase3-tae-investigation-codex.md`** — verdict + Part B event-type roadmap
+- **`phase3-parser-build-prompt.md`** — parser-build dispatch prompt
 
-## What survives across compact (don't re-discover)
+### Code
 
-### Workflow rules
-- **SSH access:** `claude@100.110.26.9` via `~/.ssh/station_key`. Non-admin
-  account. Can read `C:\Projects\` (= `\\STATION\Projects\`), `C:\Program
-  Files (x86)\Steam\steamapps\common\ELDEN RING\`, but NOT `C:\Users\Josh\`.
-- **SMB topology:** VM has `/mnt/station-projects/` (RO) and `/mnt/station-mods/`
-  (RW). Station has `\\localhost\Projects\` and `\\localhost\mods\` (both RW).
-- **PowerShell over SSH gotcha:** WitchyBND v3 uses PromptPlus which hard-fails
-  without TTY. Running `& exe args` from PowerShell over SSH bombs at init.
-  Mitigation: `Start-Process -Wait -WindowStyle Normal` from an interactive
-  PowerShell window works (drag-and-drop equivalent).
-- **Helper-PowerShell pattern that worked:** Two-window setup with the
-  Enter-presser helper running in Window 2, main batch in Window 1. Auto-press
-  via `PostMessage(WM_KEYDOWN/UP, VK_RETURN)`. Window 2 cleared 800+ "press any
-  key" prompts hands-off.
-- **WitchyBND output layout VARIES BY CHARACTER** — don't assume
-  `{outDir}/tae/...`. Always recursive-glob anim-*.xml. The completion marker
-  is `_witchy-anibnd4.xml` at the top of the output dir.
-- **WitchyBND legitimately produces dirs with ZERO anim-*.xml** for auxiliary
-  binders (`c0000_a00_hi`, etc — skeleton/overlay variants of c0000). Use
-  marker presence, not anim count, as completeness signal.
+- `probe/probe.cpp` — v5f source (~860 lines), working, currently disabled
+- `probe/probe.vcxproj` — v145 toolset
+- `probe/vendor/MinHook/` — vendored MinHook (BSD-2)
+- `probe/releases/probe-v{5d,5e,5f}.tar.gz` — release tarballs
+- **`tools/parse_taes.py`** — TAE parser (621 lines, stdlib, workers=32)
 
-### Things I broke and fixed mid-session (don't repeat)
-- `-WindowStyle Minimized` causes 48-min hangs. Use `Normal`.
-- "Tighter resume check" using `{outDir}/tae/*.xml` glob misses player layout.
-  Recursive `anim-*.xml` glob works for both layouts.
-- Em-dashes (`—`) get UTF-8-mangled through the bash → scp → PowerShell stack
-  and break PS scripts. Always ASCII-only in scripts.
-- Settings in WitchyBND's `appsettings.json` (`EndDelay`, `PauseOnError`,
-  `Offline`) DO persist correctly via JSON edit BUT do NOT disable the
-  hard-coded "Press any key to continue..." gate.
+### Data
 
-### Critical decisions still active
-- **Layered ship strategy** (CEO-reviewed): MVP audio-only week 1, target
-  filter L1 week 2, hue L2 week 3, lock-on + INI v1 week 4. v1.0.0 is
-  reserved for the full PHASE1-PLAN spec.
-- **State machine handle-keyed** (eng-reviewed), reset on `(animId change)
-  OR (animTime rewind)` with rewind threshold 0.05f.
-- **Animation time read** is medium confidence (+0x24 chain not yet verified
-  empirically). Fallback is TarnishedTool's lock-target code-cave hook.
-- **Critic plugin auto-fires** after every Write/Edit. Verdicts append to
-  tool result. Address before final summary per global protocol.
+- **`data/parry_data.json`** — 31 MB, 6,738 parry windows + 25,014
+  attack behaviors + 10,608 bullet behaviors + 97,163 future-proofing
+  ChrActionFlag events. Ships with the DLL.
+- **`data/parry_data_summary.md`** — 1-page summary + top 20 + anomaly list
+- **`data/sample-fixtures/`** — 3 small XMLs (~50 KB) for parser tests
 
-### Workflow lessons from this session (Josh-stated preferences)
-- **Don't overengineer.** Josh: "Seems like it was working fine in the
-  beginning, just needed a tweak or something. Instead we broke it
-  completely. I can't tell if we just wrote over good extracts or not."
-  When the first version mostly works, fix the specific bug; don't rewrite.
-- **Codex consult mode is valuable** when stuck or about to overengineer.
-  This session's Codex consult correctly identified that the bug was the
-  success predicate, not the lack of automation.
-- **Don't make Josh press Enter 800 times.** The auto-press helper was the
-  right call after Josh asked for it.
-- **Pre-batched session-asks are still the standard.** Josh confirmed twice
-  this session.
+### Source-of-truth raw data (Projects share, NOT in repo)
 
-## Open questions / followups (not blocking parsing)
+- `/mnt/station-projects/elden-ring/chr-extracted/` — 807 character
+  dirs, 64,385 anim-*.xml files, 2.51 GB. Unpacked from
+  `chr/c*.anibnd.dcx` via UXM Selective Unpack 2.4.2 + WitchyBND v3.0.0.1.
+- `/mnt/station-projects/tools/` — UXM, WitchyBND with TAE.Template.ER.xml
 
-1. **Source .anibnd.dcx hashing for `archive_sha256`:** files are on Josh's
-  `C:\` ER install, not on Projects share. Need to SSH-hash them if we want
-  the meta block fully populated. Lower priority than parser correctness.
-2. **Steam file-verify timing:** Josh CAN do this now since we have a copy
-  on the share, but he hasn't. Probe DLL is still disabled.
-3. **`ersc_launcher.exe` is from June 2024** (~1.7.x era). Modern Seamless
-  is 1.8+. Not blocking, but worth a Seamless update before live testing.
-4. **Probe v6 design** (Phase 3.1) is unstarted. SESSION-ASKS.md Session 2
-  documents what's needed.
+## Confidence reminder
 
-## Confidence reminder (unchanged from pre-session)
+- MVP audio-only ship (v0.1.0-alpha) by 2026-05-14: **80%**
+- Full v1 (lock-on + INI + Primary/Alert) by 2026-06-04: **70%**
+- v1 ships eventually: **95%**
 
-- MVP audio-only by 2026-05-14: 80%
-- Full v1 by 2026-06-04: 70%
-- v1 ships eventually: 95%
+Phase 3 Step 0 is done in 2 sessions instead of the planned 4. We're
+ahead of schedule.
 
-Josh expects faster than 4 weeks.
+## Next-session opening line (for post-resume me)
 
-## Next-session opening line (for post-compact me)
-
-"You just compacted. Extraction Session 1 is complete. Read this HANDOFF.md.
-The data is at `/mnt/station-projects/elden-ring/chr-extracted/` — 807 char
-dirs, 64,385 anim-*.xml files. Goal: build the TAE parser, produce
-`data/parry_data.json`, run sentinel validation. PHASE3-PLAN.md Phase 3.0
-has the parser spec. Ask Josh before you start writing significant code; he
-may have new direction since session close."
+"Read this HANDOFF.md. Phase 3 Step 0 (TAE database) is done — the
+parser + 31 MB parry_data.json are committed at d43f0fb. Next is
+Phase 3 Step 1: probe v6 design + MVP audio-cue plumbing. Confirm
+with Josh whether SSH service is started before doing any
+station-side work."
