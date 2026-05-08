@@ -1,0 +1,34 @@
+; parry-tell-probe v6 — SMOKE config
+;
+; Drop alongside parry-tell-probe.dll (in Game\mods\). Rename to
+; parry-tell-probe.ini before launching the game.
+;
+; Smoke test gameplay (60 sec):
+;   - Walk in circles for 10 sec at a Grace
+;   - One light attack
+;   - One heavy attack
+;   - One gesture
+;   - One item use
+;   - One roll
+;   - One sprint
+;   - Walk in circles 10 more sec
+; Expected output: hook fires, .bin/.csv appear, no crashes,
+; .calibration.txt identifies a monotonic anim-time candidate.
+
+[output]
+log_dir = D:\parry-tell-logs\
+session_name = smoke
+
+[capture]
+mode = smoke
+sample_rate_hz = 10
+max_enemies_tracked = 16
+top_tier_enemies = 8
+lesser_tier_rate_hz = 2
+budget_ms_per_sample = 3.0
+
+[hotkeys]
+arm_toggle = F11
+
+[diagnostics]
+verbose = true

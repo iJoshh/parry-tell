@@ -1,0 +1,32 @@
+; parry-tell-probe v6 — DISCOVERY config
+;
+; Drop alongside parry-tell-probe.dll. Rename to parry-tell-probe.ini.
+;
+; Discovery gameplay (~1 hour, AFTER qualification has passed):
+;   - Stormveil mob route (varied enemies — soldiers, Banished Knights,
+;     dogs, ravens, Grafted Scions area)
+;   - Roundtable visit (NPC characters, no combat — baseline)
+;   - Crucible Knight if available (high-confidence parryable)
+;   - Aim for diverse cXXXX coverage and lots of parryable attack reps
+;
+; Expected output: ~5-10 GB .bin file. tools/analyze_discovery.py finds the
+; runtime parry-active flag (or hyperarmor flag) by correlating memory
+; deltas with database-predicted parry windows.
+
+[output]
+log_dir = D:\parry-tell-logs\
+session_name = discovery-stormveil-1
+
+[capture]
+mode = discovery
+sample_rate_hz = 10
+max_enemies_tracked = 16
+top_tier_enemies = 8
+lesser_tier_rate_hz = 2
+budget_ms_per_sample = 3.0
+
+[hotkeys]
+arm_toggle = F11
+
+[diagnostics]
+verbose = true

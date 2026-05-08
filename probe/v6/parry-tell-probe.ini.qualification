@@ -1,0 +1,32 @@
+; parry-tell-probe v6 — QUALIFICATION config
+;
+; Drop alongside parry-tell-probe.dll. Rename to parry-tell-probe.ini.
+;
+; Qualification gameplay (2-3 min):
+;   - Travel to Stormveil entrance (or any reliable parry-eligible enemy)
+;   - Lock on to ONE enemy
+;   - Fight it for 2-3 minutes; let it get most of its attack rotations off
+;   - Press F11 to disarm before quitting (clean session boundary)
+;
+; Expected output: tools/qualify_oracle.py joins captured fields against
+; data/parry_data.json, identifies which field_at_0xNN is the cXXXX join key,
+; identifies the cXXXX of the locked-on enemy, confirms the monotonic
+; anim-time field, and verifies predicted parry windows match within ±11 ms.
+
+[output]
+log_dir = D:\parry-tell-logs\
+session_name = qualification
+
+[capture]
+mode = qualification
+sample_rate_hz = 10
+max_enemies_tracked = 16
+top_tier_enemies = 8
+lesser_tier_rate_hz = 2
+budget_ms_per_sample = 3.0
+
+[hotkeys]
+arm_toggle = F11
+
+[diagnostics]
+verbose = true
