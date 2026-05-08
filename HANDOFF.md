@@ -1,214 +1,181 @@
-# parry-tell — HANDOFF
+# HANDOFF — parry-tell (elden-ring)
 
-**Last updated:** 2026-05-08, end of pre-test prep session.
-**Status:** READY FOR JOSH'S SMOKE TEST. All non-Josh work complete.
+**Session closed:** 2026-05-08 (America/Chicago)
+**HEAD:** 6db35ca — feat: walk-through self-service tooling for the test session
+**Branch:** main — clean, in sync with origin/main
 
-## Read this first
+---
 
-You are Claude (Mae). Josh commissioned parry-tell, an Elden Ring + SotE
-mod that gives audio + visual cues for parryable boss attacks during
-Seamless Co-op as a guest. v6 is the discovery probe (not the production
-mod) — captures memory state across varied gameplay so we can identify
-the runtime parry-active flag.
+## Where we left off
 
-The product strategy is in `PHASE3-PLAN.md`:
-- Week 1: MVP audio-only via animation_id + animation_time + database
-- Mid-stream: discovery probe runs to hunt for a runtime parry-active flag
-- Weeks 2-4: L2 hue / L1 target filter / lock-on / INI config
+Probe v6 is built, reviewed, and staged. The DLL is live in `Game\mods\` with
+the smoke INI loaded. Josh has not yet run any v6 test session. The analysis
+pipeline is written and self-tested. Everything is ready for Josh's playtest.
 
-This session built the v6 probe end-to-end and prepped everything that
-can be prepped without Josh playing.
+---
 
-## What's READY
+## Accomplishments this session
 
-### DLL + configs
-- `probe/probe.cpp` v6 source (3076 lines). Built clean first try via
-  MSBuild on station. Codex-reviewed; 6 fixes + 1 nit applied; 1 blocker
-  (boss-bar fallback) addressed via priority/fill split; 1 blocker
-  (detour does compute) declined with explicit reasoning.
-- DLL staged at `C:\Projects\elden-ring\probe\stage\parry-tell-probe.dll`
-  (visible from VM at `/mnt/station-projects/elden-ring/probe/stage/`).
-- INI templates also staged in that same dir:
-  `parry-tell-probe.ini.{smoke,qualification,discovery}`.
-- Logs directory ready at `C:\Projects\elden-ring\logs\` (the INIs point
-  there). VM-side path: `/mnt/station-projects/elden-ring/logs/`.
-- Tarball backup: `probe/releases/probe-v6.tar.gz` (committed).
+1. **v6 source written and built** (~3,076 lines C++). New vs v5f: INI config
+   parser (fail-closed), 64 MB SPSC ring buffer (256 × 256 KB), worker thread
+   writing binary records + CSV + diagnostics, CSFeManImp sig-scan + boss-bar
+   enumeration, WCM enemy roster behind 7-check init quarantine, TimeAct chain
+   walk, ai_struct walk, three-tier sampling (~90 / 10 / 2 Hz), decimation
+   phase staggering, producer-side emergency drop, worker-side adaptive
+   stepdown via 5 s rolling window, session manifest with full `config_dump`,
+   smoke calibration report with anim-time gate. Built clean first try.
 
-### Analysis pipeline
-- `tools/probe_bin.py` — .bin/.csv reader library. Wire format byte-for-
-  byte symmetric with `probe.cpp` writer (verified by automated test).
-- `tools/probe_status.py` — quick "is this capture alive?" report.
-- `tools/qualify_oracle.py` — full qualification analyzer (join key,
-  anim-time field, predicted-vs-observed windows).
-- `tools/analyze_discovery.py` — discovery-mode byte-correlation
-  scaffolding. Identifies bytes that change much more inside parry
-  windows than outside; ranks top 50 candidates.
-- `tools/test_probe_bin.py` — wire-format round-trip test. PASSES.
-- `tools/test_qualify_oracle.py` — end-to-end qualification analyzer
-  test on synthetic data mimicking a real fight against c2130. PASSES.
+2. **Codex review of v6 source** — `block` verdict; all 6 fixes applied; 1
+   blocker fixed (roster pass split into priority + fill); 1 blocker declined
+   with documented reasoning (detour compute rule); delta encoding deferred to
+   v6.1.
 
-### Documentation
-- `probe/v6/PROBE-V6-SPEC.md` (856 lines, rev 4, Codex green-lit) —
-  the spec the source implements.
-- `probe/v6/RUNBOOK.md` — Josh's runbook for smoke / qualification /
-  discovery. **Read this if you're picking up mid-test.**
-- `research/conversations/001-005` — Codex review history (4 spec rounds
-  + green-light).
+3. **Post-capture analysis pipeline** — 7 files in `tools/`:
+   - `probe_bin.py` — wire-format reader library
+   - `probe_status.py` — quick health report with top-line VERDICT
+   - `qualify_oracle.py` — full qualification analyzer
+   - `analyze_discovery.py` — discovery byte-ranking scaffolding
+   - `probe_diag.py` — log aggregator for "DLL didn't load" triage
+   - `rebuild-and-stage.sh` — one-command rebuild cycle
+   - `test_probe_bin.py` (PASS), `test_qualify_oracle.py` (PASS, 8 real DB
+     parry windows)
 
-## What's WAITING for Josh
+4. **Self-service tooling** — `probe/v6/swap-mode.bat` for INI swaps between
+   modes; `probe/v6/GAMEPLAY-{smoke,qualification,discovery}.txt` for phone
+   reference; `probe_status.py` top-line VERDICT; `probe_diag.py` log
+   aggregator.
 
-DLL + smoke INI are ALREADY in `Game\mods\`. Josh just launches the game.
+5. **Staged on station** — DLL + smoke INI dropped into `Game\mods\`; v5f
+   preserved as `parry-tell-probe.dll.disabled`; old v5f CSV renamed to
+   `.csv.v5f-leftover`; `C:\Projects\elden-ring\logs\` created and
+   SMB-visible; `C:\Projects\elden-ring\probe\stage\` populated.
 
-1. Smoke test (60 sec at a Grace, 8-step deliberate-action script)
-2. Qualification (2-3 min vs ONE locked-on parry-eligible enemy)
-3. Real discovery session (~1 hour varied gameplay)
+6. **Wrap-up email sent** via Resend with all playtest steps.
 
-Mode swaps are self-service via `swap-mode.bat smoke|qualification|discovery`
-on station (in `C:\Projects\elden-ring\probe\stage\`).
+---
 
-After each session, Josh tells Claude "smoke done" / "qualification done" /
-"discovery done" and Claude parses the capture from the SMB-mounted logs
-dir.
+## Next steps (priority order)
 
-Plain-text gameplay scripts (readable from phone if Josh wants to walk
-through the steps untethered from chat):
-- `C:\Projects\elden-ring\probe\stage\GAMEPLAY-smoke.txt`
-- `C:\Projects\elden-ring\probe\stage\GAMEPLAY-qualification.txt`
-- `C:\Projects\elden-ring\probe\stage\GAMEPLAY-discovery.txt`
+**1. Josh runs smoke test** ← this is item 1
+   - Launch Elden Ring with `Game\mods\parry-tell-probe.dll` + smoke INI
+     already in place.
+   - Follow `probe/v6/GAMEPLAY-smoke.txt` (8-step deliberate-action script,
+     ~60 s at any Grace).
+   - Tell Claude "smoke done."
 
-## What to do when Josh says "smoke done"
+**2. Claude parses smoke results**
+   - Runs `python tools/probe_status.py` against the latest capture.
+   - Reads `.calibration.txt` from `C:\Projects\elden-ring\logs\`.
+   - Reports PASS / FAIL with detail.
 
-1. Find the latest smoke capture base path:
-   ```
-   ls -t /mnt/station-projects/elden-ring/logs/smoke-*.bin | head -1
-   ```
-   Strip the `.bin` suffix to get the base path.
-2. Run quick sanity check:
-   ```
-   python tools/probe_status.py /mnt/station-projects/elden-ring/logs/smoke-<ts>
-   ```
-   First line is a top-level VERDICT — read that to know if capture is
-   alive at all.
-3. Read the calibration report:
-   ```
-   cat /mnt/station-projects/elden-ring/logs/smoke-<ts>.calibration.txt
-   ```
-   Confirm one anim-time candidate has `gate=PASS` (rev3 expects +0x24).
-4. If smoke fails, run `python tools/probe_diag.py` to pull both boot.log
-   and the latest .log.txt into one view.
+**3. If smoke PASS → qualification**
+   - Josh runs `probe/v6/swap-mode.bat qualification` on station.
+   - Follows `GAMEPLAY-qualification.txt` (~2–3 min vs Banished Knight).
+   - Tells Claude "qualification done."
+   - Claude runs `python tools/qualify_oracle.py`.
 
-## What to do when Josh says "qualification done"
+**4. If qualification PASS → discovery**
+   - Josh runs `swap-mode.bat discovery`.
+   - Follows `GAMEPLAY-discovery.txt` (~1 hr Stormveil + boss).
+   - Tells Claude "discovery done."
+   - Claude runs `python tools/analyze_discovery.py` on the ~5–10 GB capture.
 
-1. Find latest qualification base path.
-2. Run `python tools/qualify_oracle.py /mnt/station-projects/elden-ring/logs/qualification-<ts>`.
-3. Verdict at end: PASSED → Josh can proceed to discovery. FAILED →
-   diagnose from the report's "reason" field.
+**5. Discovery result determines production mod path**
+   - Parry-active flag found → production mod uses Path B (live read).
+   - Not found → Path A (database lookup) per PHASE3-PLAN.md.
 
-## What to do when Josh says "discovery done"
+---
 
-1. Find latest discovery base path.
-2. Run `python tools/probe_status.py <base>` first to confirm capture
-   sizes look right (multi-GB, low drop counters).
-3. Run `python tools/analyze_discovery.py <base>`.
-4. Read top-50 candidates; look for bytes with very high in-window
-   change rate vs out-of-window. The runtime parry-active flag, if
-   reachable, sits at the top.
+## Open questions for Josh
 
-## If Josh needs to rebuild between tests (offset bug, signature drift)
+None. Everything is ready for his playtime. No decisions needed before the
+smoke test.
+
+---
+
+## Tried and ruled out this session
+
+| Approach | Why ruled out |
+|---|---|
+| `D:\parry-tell-logs\` | D: drive does not exist on station |
+| `E:\parry-tell-logs\` | E: not writable by `claude` SMB user |
+| `GetChrInsFromHandle(wcm, &stack_handle_copy)` for boss-bar handles outside roster | v5e debugging proved function returns input unchanged when given a stack pointer; documented as known limitation; roster-disabled fallback genuinely cannot resolve boss-bar handles |
+| Worker-side delta encoding in v6 | Deferred to v6.1; not blocking; produces 3–5× larger `.bin` without it |
+
+---
+
+## Files modified or created this session
+
+| File | Status |
+|---|---|
+| `probe/probe.cpp` | Rewritten v5f → v6 (~3,076 lines) |
+| `probe/v6/PROBE-V6-SPEC.md` | No changes (spec was locked at session start) |
+| `probe/v6/RUNBOOK.md` | New |
+| `probe/v6/parry-tell-probe.ini.smoke` | New |
+| `probe/v6/parry-tell-probe.ini.qualification` | New |
+| `probe/v6/parry-tell-probe.ini.discovery` | New |
+| `probe/v6/GAMEPLAY-smoke.txt` | New |
+| `probe/v6/GAMEPLAY-qualification.txt` | New |
+| `probe/v6/GAMEPLAY-discovery.txt` | New |
+| `probe/v6/swap-mode.bat` | New |
+| `probe/releases/probe-v6.tar.gz` | New build artifact |
+| `tools/probe_bin.py` | New |
+| `tools/probe_status.py` | New |
+| `tools/qualify_oracle.py` | New |
+| `tools/analyze_discovery.py` | New |
+| `tools/probe_diag.py` | New |
+| `tools/rebuild-and-stage.sh` | New |
+| `tools/test_probe_bin.py` | New |
+| `tools/test_qualify_oracle.py` | New |
+| `CHANGELOG.md` | New (first entry) |
+| `HANDOFF.md` | Rewritten (this file) |
+| `PHASE3-PLAN.md` | Session log appended |
+| `C:\Projects\elden-ring\logs\` | Created on station, empty, SMB-visible |
+| `C:\Projects\elden-ring\probe\stage\` | Populated with DLL + INIs + scripts |
+| `/mnt/station-mods/parry-tell-probe.dll` | v6 dropped (fresh) |
+| `/mnt/station-mods/parry-tell-probe.ini` | Smoke config |
+| `/mnt/station-mods/parry-tell-probe.dll.disabled` | v5f preserved as audit trail |
+| `/mnt/station-mods/parry-tell-probe.csv.v5f-leftover` | Renamed from `.csv` |
+
+---
+
+## Services / processes
+
+No services restarted this session.
+
+- `Game\mods\parry-tell-probe.dll` — v6 DLL is in place; smoke INI loaded.
+  Elden Ring was closed during the drop; copy succeeded cleanly.
+- SSH service on station: manually started by Josh at session start; verify
+  state at next session resume.
+- SMB mounts (`/mnt/station-mods/`, `/mnt/station-projects/`) — live via
+  `x-systemd.automount`; will re-mount on first access next session.
+
+---
+
+## Git state at close
 
 ```
-bash tools/rebuild-and-stage.sh
+Branch:       main
+HEAD:         6db35ca  feat: walk-through self-service tooling for the test session
+Working tree: clean (before session-close commit)
+Remote:       origin/main — in sync (just pushed)
 ```
 
-This script handles: SCP source + project + vendor → MSBuild on station →
-verify DLL produced → stage → byte-compare staged vs build artifact.
+Commits this session:
+- `9af84e8` feat(probe): v6 source — discovery probe per locked spec
+- `7c4827e` feat(tools): post-capture analysis pipeline + runbook
+- `6db35ca` feat: walk-through self-service tooling for the test session
 
-After the rebuild, the DLL in `Game\mods\` is now stale. Either:
-- Drop the new one over it: `cp /mnt/station-projects/elden-ring/probe/stage/parry-tell-probe.dll /mnt/station-mods/parry-tell-probe.dll`
-- Or have Josh run a fresh `swap-mode.bat <mode>` (which doesn't update
-  the DLL — only the INI). The DLL drop is a separate cp.
+A session-close commit + tag will be added by `commit-and-tag.sh sc` after
+this HANDOFF is written.
 
-## Common pitfalls (preempting future me's mistakes)
+---
 
-1. **Don't "fix" the spec.** It's been Codex-reviewed 4 times; any
-   contradiction is a real one and needs Josh's call before changing.
-2. **Don't run discovery before qualification PASSES.** The whole point
-   of qualification is to prove the join key + anim-time interpretation
-   before committing to a 1-hour capture.
-3. **Don't try to resolve boss-bar handles outside the roster.** v5e
-   debugging proved `GetChrInsFromHandle(wcm, &stack_handle_copy)`
-   returns the input back unchanged. The function needs a live struct
-   field. The roster sweep is the only safe path; if roster fails,
-   boss-bar enemies degrade to Tier-1-only (their handles in the
-   `boss_bar_handles[]` array; no Tier 2/3). This is intentional
-   per spec.
-4. **Don't add JSON loading to the DLL.** The 30 MB `parry_data.json`
-   is the post-session oracle, parsed by Python. The DLL has zero JSON
-   dependency.
-5. **Don't add VirtualQuery to the detour.** v5f learned this lesson —
-   30+ syscalls per sample on the game thread caused per-second hitches.
-   Use `LooksLikeUserPtrFast` (pure compute) only.
+## Pickup prompt for next session
 
-## Game-version cliff
-
-The probe is pinned to ER FileVersion 2.6.1.0 via the version check in
-`CheckExpectedGameVersion`. If Steam updates the game, the probe will
-log `init_fail: ER FileVersion <new> (expected 2.6.1.0)` and refuse to
-install the hook. We then need to re-research signatures (most likely
-work; offsets less so) and bump the expected version.
-
-## Build pipeline (if source ever needs to change)
-
-```bash
-# 0. Verify SSH is up (Josh starts manually):
-timeout 5 ssh -i ~/.ssh/station_key -o ConnectTimeout=3 -o BatchMode=yes \
-  claude@station "echo SSH_OK"
-
-# 1. Push:
-scp -i ~/.ssh/station_key ~/claude/elden-ring/probe/probe.cpp \
-  claude@station:C:/Projects/elden-ring/probe/probe.cpp
-
-# 2. Build:
-ssh -i ~/.ssh/station_key claude@station \
-  '"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" "C:\Projects\elden-ring\probe\probe.vcxproj" /p:Configuration=Release /p:Platform=x64 /t:Rebuild /v:minimal'
-
-# 3. Verify (DLL lands here via SMB):
-ls -la /mnt/station-projects/elden-ring/probe/bin/Release/parry-tell-probe.dll
-
-# 4. Re-stage:
-ssh -i ~/.ssh/station_key claude@station \
-  'copy /Y C:\Projects\elden-ring\probe\bin\Release\parry-tell-probe.dll C:\Projects\elden-ring\probe\stage\parry-tell-probe.dll'
-```
-
-## Known follow-ups (post-discovery)
-
-1. **Delta encoding in the worker** (TODO at `probe.cpp:2130`) — would
-   shrink .bin from ~5-10 GB to ~1-3 GB. Not blocking; ship correctness
-   first.
-2. **Build hash** — currently a `BUILD_<date>_<time>` placeholder in
-   the manifest. Real SHA-256 of source would require generating a
-   header at build time. Low priority.
-3. **`tools/analyze_discovery.py` v1 is scaffolding only.** Once we
-   have a real .bin from a 1-hour session, the byte-correlation logic
-   will need real-data tuning. The top-50 ranking is a reasonable
-   starting point but doesn't yet detect "this byte flips on→off→on at
-   window boundaries" — that pattern recognition is the next step.
-4. **L1/L2 production-mod work** is a separate project that follows
-   discovery — see `PHASE3-PLAN.md`.
-
-## Josh's standing instruction
-
-"Do it right. My arrival timeline isn't a concern. Ever. Do it right."
-
-## Confidence levels
-
-- v6 spec correct: HIGH (4 rounds Codex review)
-- v6 source compiles: PROVEN (clean first build, then clean rebuild after fixes)
-- Wire format symmetric: PROVEN (`tools/test_probe_bin.py` PASSES)
-- Qualification logic correct: PROVEN on synthetic data (`tools/test_qualify_oracle.py` PASSES)
-- Smoke test passes in-game: HIGH (v5f hook layer already validated; v6 inherits it)
-- Qualification passes in-game: MEDIUM-HIGH (uncertainty in field-offset mapping;
-  the test is designed to discover it)
-- Discovery finds parry-active flag: MEDIUM (Codex prior 75-85%; lower for
-  finding it in just 1 hr of capture)
-- MVP audio-only ships: HIGH (path A is fallback regardless)
+> "Probe v6 is built and staged. Josh has just finished the smoke test (or
+> is about to). Load HANDOFF.md, confirm SMB mounts are live
+> (`mount | grep station`), then run `python tools/probe_status.py` against
+> the latest capture in `C:\Projects\elden-ring\logs\` and report the
+> top-line VERDICT. If PASS, proceed to qualification per the next-steps
+> sequence in HANDOFF.md."

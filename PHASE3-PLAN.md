@@ -534,3 +534,61 @@ Test matrix (from PHASE1-PLAN, with CEO-review additions):
        it doesn't interact with UXM-modified game files)
 - [ ] HANDOFF.md updated to point at this plan as active
 - [ ] Frontmatter status flipped from `draft` to `accepted`
+
+## Session Log
+
+### 2026-05-08 — v6 probe built, staged, and analysis pipeline complete
+
+**Accomplishments**
+
+1. **v6 source written and built** — ~3,076 lines of C++ implementing the
+   locked v6 spec. INI config parser (fail-closed), 64 MB SPSC ring buffer,
+   worker thread with binary + CSV + diagnostics output, CSFeManImp sig-scan,
+   WCM enemy roster behind 7-check quarantine, TimeAct + ai_struct walks,
+   three-tier sampling, adaptive stepdown, session manifest, smoke calibration
+   report. Built clean via MSBuild first try.
+2. **Codex review addressed** — 6 fixes applied, 1 blocker fixed (roster
+   pass split), 1 blocker declined with documented reasoning (detour compute
+   rule), 1 TODO deferred to v6.1 (delta encoding).
+3. **Post-capture analysis pipeline written** — 7 files in `tools/`:
+   `probe_bin.py`, `probe_status.py`, `qualify_oracle.py`,
+   `analyze_discovery.py`, `probe_diag.py`, `rebuild-and-stage.sh`,
+   plus self-tests `test_probe_bin.py` (PASS) and `test_qualify_oracle.py`
+   (PASS, 8 real DB parry windows).
+4. **Self-service tooling pre-empted friction** — `swap-mode.bat` for INI
+   swaps; three `GAMEPLAY-*.txt` phone scripts; `probe_status.py` top-line
+   VERDICT; `probe_diag.py` log aggregator.
+5. **Staged on station** — DLL + smoke INI dropped into `Game\mods\`; v5f
+   preserved as `.dll.disabled`; logs dir created; stage dir populated.
+6. **Wrap-up email sent to Josh** via Resend with all playtest steps.
+
+**Current state**
+
+- DLL is live in `Game\mods\`, smoke INI loaded. Josh can launch the game.
+- All analysis tools tested with synthetic data; both self-tests PASS.
+- HEAD `6db35ca` pushed to `origin/main`; working tree clean.
+
+**Next steps (priority order)**
+
+1. Josh runs smoke test (60 s at any Grace, 8-step deliberate-action script
+   from `GAMEPLAY-smoke.txt`).
+2. Josh tells Claude "smoke done"; Claude runs `probe_status.py` + reads
+   `.calibration.txt`.
+3. If smoke PASS → Josh runs `swap-mode.bat qualification`, then 2–3 min vs
+   Banished Knight.
+4. Josh tells Claude "qualification done"; Claude runs `qualify_oracle.py`.
+5. If qualification PASS → Josh runs `swap-mode.bat discovery`, then ~1 hr
+   Stormveil + boss.
+6. Claude runs `analyze_discovery.py` on the ~5–10 GB capture.
+7. If discovery finds the parry-active flag → production mod uses Path B;
+   otherwise Path A (database lookup) per this plan.
+
+**Ruled out this session**
+
+- `D:\parry-tell-logs\` — D: drive does not exist on station; switched to
+  `C:\Projects\elden-ring\logs\`.
+- `E:\parry-tell-logs\` — E: not writable by `claude` user.
+- `GetChrInsFromHandle(wcm, &stack_handle_copy)` for boss-bar handle
+  resolution outside the roster — v5e debugging proved the function returns
+  input unchanged when given a stack pointer; documented as known limitation.
+- Worker-side delta encoding in v6 — deferred to v6.1; not blocking.
