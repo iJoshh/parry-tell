@@ -1,0 +1,40 @@
+QUALIFICATION GAMEPLAY (2-3 min) — parry-tell-probe v6
+========================================================
+
+WHERE: somewhere with a reliable, parry-eligible enemy you can fight in
+       isolation. Recommended: a Banished Knight at Stormveil entrance
+       (common, parryable, easy to reset, lots of attack reps).
+WHY:   prove the join key (which captured field maps to a cXXXX), confirm
+       the anim-time field works on enemy data, verify predicted parry
+       windows align with observed timestamps within ±11 ms.
+
+STEPS:
+
+1. Travel to Stormveil entrance (or your chosen enemy's spawn).
+2. Approach the enemy until they aggro. Keep them isolated — no other
+   enemies in the encounter if avoidable.
+3. Lock on to the enemy (target lock).
+4. Press F11 to ARM the probe.
+5. Fight for 2-3 minutes. Goals during the fight:
+   - Let the enemy throw their full attack rotation. Don't burst-kill.
+   - Block, dodge, or eat hits — whatever keeps them swinging.
+   - If you do parry, that's fine; we just need them to attack a lot.
+   - Reset the encounter (run back to Grace, return) if you kill them
+     before 2 min and there's another spawn.
+6. Press F11 to DISARM.
+7. Quit to main menu.
+
+EXPECTED OUTPUT in C:\Projects\elden-ring\logs\:
+  qualification-<ts>.bin
+  qualification-<ts>.csv
+  qualification-<ts>.log.txt
+
+WHEN DONE: tell Claude "qualification done" and they'll run the analyzer.
+
+PASS LOOKS LIKE:
+  Verdict: PASSED
+  Join key: field_at_0xNN matches cXXXX (some character ID)
+  Anim time field: TimeAct + 0xYY (passes the gate)
+  Window match rate: at least 60% within ±11 ms
+
+DO NOT PROCEED TO DISCOVERY UNTIL QUALIFICATION PASSES.

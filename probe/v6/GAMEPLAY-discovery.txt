@@ -1,0 +1,64 @@
+DISCOVERY GAMEPLAY (~1 hour) — parry-tell-probe v6
+====================================================
+
+WHERE: varied. The whole point is to capture diverse enemy types and
+       lots of parryable attack reps so post-session analysis can find
+       the runtime parry-active flag.
+WHY:   the 1-hour capture is the dataset for the actual discovery work.
+       What we identify here decides whether the production mod uses
+       Path A (animation_id + animation_time + database lookup) or
+       Path B (single runtime parry-active flag, faster + simpler).
+
+PRECONDITION: qualification has PASSED. Don't run this until it has.
+
+STEPS:
+
+1. Start at a Grace. Press F11 to ARM (do this BEFORE traveling — we
+   want the capture to include some non-combat baseline).
+2. Suggested route (~60 min, adjust to taste):
+
+   Phase 1 — Stormveil mob route (~25 min)
+     - Soldiers near the gate
+     - Banished Knights (multiple)
+     - Dogs
+     - Ravens / crows
+     - Grafted Scion area (if in the run)
+     - Vary playstyle: parry attempts, regular combat, getting hit
+
+   Phase 2 — Roundtable (~10 min)
+     - Pure non-combat baseline
+     - Walk around, talk to NPCs, browse shops
+     - This gives us "what does memory look like with no parryable
+       attacks active" as a contrast set
+
+   Phase 3 — A boss attempt (~25 min)
+     - Crucible Knight if available (high-confidence parryable)
+     - Or any boss you've been working on
+     - The boss-bar slot 0 path matters here; we want to see boss-bar
+       enemies enroll in the roster
+
+3. Press F11 to DISARM.
+4. Quit cleanly (main menu, then quit).
+
+EXPECTED OUTPUT: roughly 5-10 GB on disk, possibly across rotated files
+  discovery-stormveil-1-<ts>.bin
+  discovery-stormveil-1-<ts>.bin.001  (if the .bin grew past 2 GB)
+  discovery-stormveil-1-<ts>.bin.002
+  ...
+  discovery-stormveil-1-<ts>.csv
+  discovery-stormveil-1-<ts>.log.txt
+
+WHEN DONE: tell Claude "discovery done" and they'll run the analyzer.
+
+The analyzer's first pass is scaffolding — it ranks bytes by how often
+they change inside vs outside database-predicted parry windows. The
+runtime parry-active flag (if it's reachable) shows up at the top of
+that ranking. From there it's iterative work to confirm it really is
+the flag and not a coincidence.
+
+If we don't find a flag, that's still valuable — it means production
+mod uses Path A (database lookup), which was always the fallback plan.
+
+DON'T PANIC IF YOU GET INTERRUPTED: F11 to disarm is a clean checkpoint;
+the .bin file is flushed at the end of each second. If you have to quit
+mid-session, what's captured up to that point is usable.

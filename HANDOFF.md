@@ -57,38 +57,76 @@ can be prepped without Josh playing.
 
 ## What's WAITING for Josh
 
-The next thing Josh is needed for is the actual gameplay. No more code
-work prevents starting. The list:
+DLL + smoke INI are ALREADY in `Game\mods\`. Josh just launches the game.
 
 1. Smoke test (60 sec at a Grace, 8-step deliberate-action script)
 2. Qualification (2-3 min vs ONE locked-on parry-eligible enemy)
 3. Real discovery session (~1 hour varied gameplay)
 
-After each, I parse the capture from the SMB-mounted logs dir and report
-back. The tool commands are in `RUNBOOK.md`.
+Mode swaps are self-service via `swap-mode.bat smoke|qualification|discovery`
+on station (in `C:\Projects\elden-ring\probe\stage\`).
 
-## What to do FIRST when Josh says "ready"
+After each session, Josh tells Claude "smoke done" / "qualification done" /
+"discovery done" and Claude parses the capture from the SMB-mounted logs
+dir.
 
-1. Check the game is closed (mods are file-locked while running).
-2. Copy DLL + smoke INI into `Game\mods\`:
+Plain-text gameplay scripts (readable from phone if Josh wants to walk
+through the steps untethered from chat):
+- `C:\Projects\elden-ring\probe\stage\GAMEPLAY-smoke.txt`
+- `C:\Projects\elden-ring\probe\stage\GAMEPLAY-qualification.txt`
+- `C:\Projects\elden-ring\probe\stage\GAMEPLAY-discovery.txt`
+
+## What to do when Josh says "smoke done"
+
+1. Find the latest smoke capture base path:
    ```
-   cp /mnt/station-projects/elden-ring/probe/stage/parry-tell-probe.dll \
-      /mnt/station-mods/parry-tell-probe.dll
-   cp /mnt/station-projects/elden-ring/probe/stage/parry-tell-probe.ini.smoke \
-      /mnt/station-mods/parry-tell-probe.ini
+   ls -t /mnt/station-projects/elden-ring/logs/smoke-*.bin | head -1
    ```
-3. Tell Josh "ready, smoke INI is loaded" and the 8-step script (also
-   in the smoke INI itself as a comment block).
-4. After Josh runs and saves, parse:
+   Strip the `.bin` suffix to get the base path.
+2. Run quick sanity check:
    ```
    python tools/probe_status.py /mnt/station-projects/elden-ring/logs/smoke-<ts>
    ```
-5. Read the calibration report at `<base>.calibration.txt` and confirm
-   one anim-time candidate has `gate=PASS`.
+   First line is a top-level VERDICT — read that to know if capture is
+   alive at all.
+3. Read the calibration report:
+   ```
+   cat /mnt/station-projects/elden-ring/logs/smoke-<ts>.calibration.txt
+   ```
+   Confirm one anim-time candidate has `gate=PASS` (rev3 expects +0x24).
+4. If smoke fails, run `python tools/probe_diag.py` to pull both boot.log
+   and the latest .log.txt into one view.
 
-For qualification, swap to `parry-tell-probe.ini.qualification`. For
-discovery, swap to `parry-tell-probe.ini.discovery`. The DLL doesn't
-change between modes — only the INI.
+## What to do when Josh says "qualification done"
+
+1. Find latest qualification base path.
+2. Run `python tools/qualify_oracle.py /mnt/station-projects/elden-ring/logs/qualification-<ts>`.
+3. Verdict at end: PASSED → Josh can proceed to discovery. FAILED →
+   diagnose from the report's "reason" field.
+
+## What to do when Josh says "discovery done"
+
+1. Find latest discovery base path.
+2. Run `python tools/probe_status.py <base>` first to confirm capture
+   sizes look right (multi-GB, low drop counters).
+3. Run `python tools/analyze_discovery.py <base>`.
+4. Read top-50 candidates; look for bytes with very high in-window
+   change rate vs out-of-window. The runtime parry-active flag, if
+   reachable, sits at the top.
+
+## If Josh needs to rebuild between tests (offset bug, signature drift)
+
+```
+bash tools/rebuild-and-stage.sh
+```
+
+This script handles: SCP source + project + vendor → MSBuild on station →
+verify DLL produced → stage → byte-compare staged vs build artifact.
+
+After the rebuild, the DLL in `Game\mods\` is now stale. Either:
+- Drop the new one over it: `cp /mnt/station-projects/elden-ring/probe/stage/parry-tell-probe.dll /mnt/station-mods/parry-tell-probe.dll`
+- Or have Josh run a fresh `swap-mode.bat <mode>` (which doesn't update
+  the DLL — only the INI). The DLL drop is a separate cp.
 
 ## Common pitfalls (preempting future me's mistakes)
 

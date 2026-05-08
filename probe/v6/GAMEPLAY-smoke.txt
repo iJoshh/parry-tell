@@ -1,0 +1,37 @@
+SMOKE TEST GAMEPLAY (60 sec) — parry-tell-probe v6
+====================================================
+
+WHERE: any Site of Grace.
+WHY:   confirm DLL loads, log files appear, no crash, calibration report
+       finds a monotonic anim-time field.
+
+STEPS:
+
+1. Sit at Grace. Stand up but stay near the Grace.
+2. Press F11 to ARM the probe.
+3. Walk in circles for 10 seconds (locomotion loops).
+4. One light attack (R1 / RB).
+5. One heavy attack (R2 / RT).
+6. One gesture (any — longer is better, e.g. "Point Forward" or
+   "Erudition" if you have the lantern).
+7. One item use (any consumable — flask is fine).
+8. One roll (B / Circle).
+9. One sprint for ~2 seconds.
+10. Walk in circles 10 more seconds.
+11. Press F11 to DISARM.
+12. Quit to main menu (or quit to desktop — both fine for the smoke).
+
+EXPECTED OUTPUT in C:\Projects\elden-ring\logs\:
+  smoke-<ts>.bin
+  smoke-<ts>.csv
+  smoke-<ts>.log.txt
+  smoke-<ts>.calibration.txt   <-- the one that says PASS or FAIL
+
+WHEN DONE: tell Claude "smoke done" and they'll parse it.
+
+PEEK FOR YOURSELF (optional): the calibration result is plain text. Open:
+  C:\Projects\elden-ring\logs\smoke-<ts>.calibration.txt
+At least one of the four lines should end with `gate=PASS`.
+
+IF NOTHING APPEARS: tell Claude "smoke produced no files" and they'll
+read the boot log to figure out why the DLL didn't load.

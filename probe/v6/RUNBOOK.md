@@ -17,19 +17,38 @@ sessions and what happens after each.
   End-to-end qualification logic verified by `tools/test_qualify_oracle.py`
   on synthetic data that mimics a real fight (passes).
 
-## Drop the DLL when ready
+## Already dropped (as of 2026-05-08)
 
-The mods folder still has v5f staged as `.disabled`. When you give the
-"ready to reload" signal, I'll:
+The DLL and the smoke INI are ALREADY in `Game\mods\`:
 
-1. Copy `C:\Projects\elden-ring\probe\stage\parry-tell-probe.dll` to
-   `Game\mods\parry-tell-probe.dll` (which I see as
-   `/mnt/station-mods/parry-tell-probe.dll`).
-2. Copy `parry-tell-probe.ini.smoke` (or whichever mode you're testing) to
-   `Game\mods\parry-tell-probe.ini`. The DLL reads this exact filename.
-3. Confirm via SMB.
+```
+Game\mods\parry-tell-probe.dll          <- v6, 229 KB, fresh
+Game\mods\parry-tell-probe.ini          <- smoke config (mode = smoke)
+Game\mods\parry-tell-probe.dll.disabled <- v5f kept as audit-trail backup
+Game\mods\parry-tell-probe.csv.v5f-leftover <- old v5f data, archived
+```
 
-You launch the game from there.
+Launch the game and you're in smoke mode immediately.
+
+## Switching modes (smoke -> qualification -> discovery)
+
+Run on station (NOT the VM, NOT in Tailscale shell):
+
+```
+swap-mode.bat smoke
+swap-mode.bat qualification
+swap-mode.bat discovery
+```
+
+The script lives at `C:\Projects\elden-ring\probe\stage\swap-mode.bat`.
+**Elden Ring must be CLOSED** when you run it (file lock).
+
+The script copies the appropriate INI from the staging area over
+`Game\mods\parry-tell-probe.ini`. The DLL is unchanged across modes.
+
+To see the script's output: open `cmd.exe`, `cd C:\Projects\elden-ring\probe\stage`,
+then run `swap-mode.bat smoke`. (Double-clicking from Explorer also
+works but the window vanishes on success.)
 
 ## Smoke test (60 sec)
 
@@ -192,17 +211,36 @@ real data.
 
 ## Tooling reference
 
+Run from `~/claude/elden-ring/` on the VM.
+
 ```
-# Quick "is this capture alive?" check
+# Quick "is this capture alive?" — top-line PASS/FAIL verdict at the head
 python tools/probe_status.py <path-without-.bin>
 
-# Self-tests (run anytime to confirm pipeline is working)
+# When something fails — pulls boot.log + latest .log.txt into one view
+python tools/probe_diag.py [--tail 50]
+
+# Self-tests (run anytime to confirm pipeline still works)
 python tools/test_probe_bin.py            # wire format round-trip
 python tools/test_qualify_oracle.py       # synthetic qualification end-to-end
 
 # Full analysis
 python tools/qualify_oracle.py <path-without-.bin>  [--tolerance-ms 11]
 python tools/analyze_discovery.py <path-without-.bin>  [--cid c4380]
+```
+
+Capture base paths (replace `<ts>` with the real timestamp):
+```
+/mnt/station-projects/elden-ring/logs/smoke-<ts>
+/mnt/station-projects/elden-ring/logs/qualification-<ts>
+/mnt/station-projects/elden-ring/logs/discovery-stormveil-1-<ts>
+```
+
+Plain-text gameplay scripts (you can pull these up on phone):
+```
+C:\Projects\elden-ring\probe\stage\GAMEPLAY-smoke.txt
+C:\Projects\elden-ring\probe\stage\GAMEPLAY-qualification.txt
+C:\Projects\elden-ring\probe\stage\GAMEPLAY-discovery.txt
 ```
 
 ## What changes between sessions

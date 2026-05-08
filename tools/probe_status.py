@@ -47,12 +47,27 @@ def main(argv: list[str]) -> int:
                 first_sample = bf.samples[0]
             last_sample = bf.samples[-1]
 
+    # Top-line verdict — quick visual signal before the detail dump.
+    if not files_seen:
+        print(f"VERDICT: NO CAPTURE — no files found for base path {base}")
+        print(f"  Looking for: {base}.bin (and rotations .bin.001, .bin.002, ...)")
+        print(f"  If the game ran but no files appeared, the DLL didn't load or sig-scan failed.")
+        print(f"  Check parry-tell-probe.boot.log next to the DLL in Game\\mods\\.")
+        return 1
+
+    if total_samples == 0:
+        print(f"VERDICT: CAPTURE EMPTY — files exist but no samples were emitted")
+        print(f"  Likely cause: F11 was never pressed (probe stays in disarmed state by default).")
+        print(f"  Check the .log.txt for sig-scan failures or roster-validation warnings.")
+    elif total_samples < 50:
+        print(f"VERDICT: VERY SHORT CAPTURE — only {total_samples} samples")
+        print(f"  Was F11 pressed for less than ~1 second?")
+    else:
+        print(f"VERDICT: CAPTURE LIVE — {total_samples} samples emitted")
+
+    print()
     print(f"=== probe capture: {os.path.basename(base)} ===")
     print()
-    if not files_seen:
-        print(f"NO FILES FOUND for base path {base}")
-        print(f"   Looking for: {base}.bin (and rotations .bin.001, .bin.002, ...)")
-        return 1
     for fpath, sz, recs in files_seen:
         print(f"  {os.path.basename(fpath)}: {sz/1024/1024:.1f} MB, {recs} records")
     print()
