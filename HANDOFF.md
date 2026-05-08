@@ -312,21 +312,119 @@ When source is built:
   it in 1 hour of capture)
 - MVP audio-only ships: HIGH (path A as fallback is well-understood)
 
+## Common temptations to RESIST when writing v6 source
+
+These are things v5f did differently from the v6 spec, OR things
+PostureBarMod / TarnishedTool sources do that the v6 spec deliberately
+does NOT do. Resist them.
+
+1. **DON'T interpret `+0x6C`, `+0x68`, `+0x60`, etc.** v5f labels them
+   `chrType`, `teamType`, etc. Sources DISAGREE on what each offset
+   actually is. v6 spec captures all of `0x038, 0x060, 0x064, 0x068,
+   0x06C, 0x080, 0x1E8` as raw `field_at_0xNN` u32 values. NO semantic
+   labels. The post-session analysis tool decides which is what.
+
+2. **DON'T keep v5f's 1 Hz sample cooldown.** v5f gates samples to once
+   per second. v6 captures the focused enemy at every hook tick (~90 Hz).
+   The "cooldown" concept is gone; rate-limiting is via decimation
+   counters per region, not a global sample interval.
+
+3. **DON'T load `parry_data.json` in the DLL.** The DLL has zero JSON
+   dependency. The qualification analysis is a Python tool (NOT YET
+   WRITTEN) that runs post-session.
+
+4. **DON'T do byte-delta computation in the detour.** The detour ONLY
+   does memcpy into a preallocated buffer + atomic queue push. The
+   worker thread does delta encoding off the game thread. v5f doesn't
+   have deltas at all — v6 introduces them, but they live on the worker.
+
+5. **DON'T VirtualQuery on the hot path.** v5f learned this lesson —
+   `LooksReadable<T>` and `LooksLikeUserPtr` (the slow ones) caused
+   per-second hitches. Use `LooksLikeUserPtrFast` (pure compute, no
+   syscalls) in the detour. The slow versions are init-time only.
+
+6. **DON'T skip the 7-check roster quarantine.** The `WCM + 0x1F1B8/
+   +0x1F1C0` enemy roster offsets are PROVISIONAL. If checks 1-6 fail
+   at init, set `roster_enabled=false` and fall back to player +
+   boss-bars only. NOT a fail-closed condition.
+
+7. **DON'T try to be clever about character-ID mapping.** The qualifi-
+   cation run figures out which `field_at_0xNN` is the cXXXX join key.
+   The DLL captures fields neutrally and lets analysis decide.
+
+8. **DON'T forget to write the session manifest.** First record in
+   every `.bin`. Includes ER FileVersion, sig-scan results, config
+   dump, schema version, build hash. v5f has nothing like this.
+
+9. **DON'T let smoke mode write Tier 3 records.** Smoke = Tier 1+2
+   only. The spec is explicit. Tier 3 only fires in `qualification`
+   and `discovery` modes.
+
+10. **DON'T install the hook before the buffer pool is allocated.**
+    Init order is hard-specified in spec §Init order rev3 (steps a-l).
+    Hook install is step `j`, AFTER all 64 MB of buffers are ready.
+
+## Build pipeline — exact commands
+
+These are tested. Use these literally rather than reconstructing from
+CLAUDE.md:
+
+```bash
+# 1. Verify SSH service is up (Josh starts it manually):
+timeout 5 ssh -i ~/.ssh/station_key -o ConnectTimeout=3 -o BatchMode=yes claude@station "echo SSH_OK"
+# Expected output: SSH_OK
+# If not OK: stop, ask Josh to start the SSH service.
+
+# 2. Push source to station:
+scp -i ~/.ssh/station_key ~/claude/elden-ring/probe/probe.cpp claude@station:C:/Projects/elden-ring/probe/probe.cpp
+
+# 3. Trigger MSBuild via SSH (note the inner quoting — it works):
+ssh -i ~/.ssh/station_key claude@station '"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" "C:\Projects\elden-ring\probe\probe.vcxproj" /p:Configuration=Release /p:Platform=x64 /t:Rebuild /v:minimal'
+
+# 4. Read build output (DLL lands here via SMB):
+ls -la /mnt/station-projects/elden-ring/probe/bin/Release/parry-tell-probe.dll
+# If file exists: build succeeded.
+# If not: re-run step 3 with /v:detailed instead of /v:minimal to see errors.
+
+# 5. Drop into mods\ for testing (RW SMB mount):
+cp /mnt/station-projects/elden-ring/probe/bin/Release/parry-tell-probe.dll \
+   /mnt/station-mods/parry-tell-probe.dll
+# 5b. ALSO copy the config file Josh provides (created post-build):
+# cp <ini> /mnt/station-mods/parry-tell-probe.ini
+```
+
+If MSBuild fails with PowerShell quoting issues, the fallback is to use
+the wrapper script at `~/bin/build-probe.sh` (NOT YET CREATED — write
+one if needed, but the inline commands above worked for v5f).
+
 ## Resume command for post-compact me
 
 ```
-Read probe/v6/PROBE-V6-SPEC.md (entire spec), then write
-probe/probe.cpp as v6 per spec (replace v5f's content). After source
-is written:
-1. Self-review pass
-2. Dispatch @codex critic on the source
-3. Address findings
-4. Push to station, MSBuild, verify DLL produced
-5. Stop and check with Josh before any test session
+1. Read this HANDOFF.md fully.
+2. Read probe/v6/PROBE-V6-SPEC.md fully (856 lines — there is no
+   shortcut; the design's in the details).
+3. Skim research/conversations/004 and 005 for the rationale on
+   sampling rates and final green-light.
+4. Skim probe/probe.cpp (v5f, 865 lines) for the safety primitives
+   you'll inherit (SafeRead<T>, LooksLikeUserPtrFast, sig-scan,
+   MinHook, module pinning). DO NOT inherit v5f's design where it
+   conflicts with v6 spec — see "Common temptations to RESIST" above.
+5. Write probe/probe.cpp v6 (replaces v5f content). ~1500-1800 lines.
+6. Self-review pass — read your source as a critic looking for the
+   "common temptations" you might have fallen into.
+7. Dispatch @codex critic on the source via the Task tool.
+8. Address findings.
+9. Use the build pipeline commands above to push, compile, verify
+   DLL produced.
+10. Surface to Josh BEFORE any in-game test. He decides smoke test
+    timing.
 
-Spec is GREEN-LIT — no more spec iterations needed unless you find
-a real implementation contradiction. If you do, surface to Josh
-before changing the spec.
+Spec is GREEN-LIT — no more spec iterations needed unless you find a
+real implementation contradiction. If you do, surface to Josh before
+changing the spec.
+
+Don't rebuild trust by re-reviewing the spec with Codex; it's already
+been reviewed 4 times. Trust the spec, focus on the source.
 
 Josh's standing instruction: "Do it right. My arrival timeline isn't
 a concern. Ever. Do it right."
