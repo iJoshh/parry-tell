@@ -31,3 +31,4 @@ data/raw/
 data/*.tar.gz
 data/*.zip
 *.anibnd.dcx
+__pycache__/
