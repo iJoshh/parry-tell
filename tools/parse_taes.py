@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_SOURCE = Path("/mnt/station-projects/elden-ring/chr-extracted")
+DEFAULT_SOURCE = Path("data/raw/chr")
 DEFAULT_OUTPUT = Path("data/parry_data.json")
 DEFAULT_SUMMARY = Path("data/parry_data_summary.md")
 SAMPLE_FIXTURES = Path("data/sample-fixtures")
@@ -604,6 +604,13 @@ def run_parse(source: Path, output: Path, summary: Path, single_char: str | None
 
 
 def run_sentinel(output: Path, summary: Path, workers: int) -> int:
+    """Validate against sample fixtures only.
+
+    Does NOT write to canonical data/parry_data.json or data/parry_data_summary.md
+    by default — sentinel runs are validation-only and must not clobber the real
+    database. Caller can pass non-default --output/--summary paths to write
+    sentinel artifacts somewhere else (e.g., for debugging).
+    """
     started = time.perf_counter()
     extracted_at = utc_now_iso()
     source = resolve_repo_path(SAMPLE_FIXTURES)
@@ -615,9 +622,15 @@ def run_sentinel(output: Path, summary: Path, workers: int) -> int:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
-    write_json(output, database)
-    write_summary(summary, database, diagnostics, source, wall_clock_seconds)
-    print("Sentinel fixtures passed.")
+    canonical_output = resolve_repo_path(DEFAULT_OUTPUT)
+    canonical_summary = resolve_repo_path(DEFAULT_SUMMARY)
+    if output != canonical_output and summary != canonical_summary:
+        write_json(output, database)
+        write_summary(summary, database, diagnostics, source, wall_clock_seconds)
+        print(f"Sentinel fixtures passed. Wrote artifacts to {output} and {summary}.")
+    else:
+        print("Sentinel fixtures passed. (No artifacts written; "
+              "pass --output and --summary to write to non-canonical paths.)")
     return 0
 
 
