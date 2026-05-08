@@ -131,6 +131,29 @@ cue plumbing).
 
 ## Immediate next action
 
+**Local chr/ copy in progress (Josh dragging from station to VM).**
+Destination: `~/claude/elden-ring/data/raw/chr/`. Size ~6.5 GB. Includes
+both raw `c*.anibnd.dcx` files AND the WitchyBND-unpacked
+`*-anibnd-dcx-wanibnd/` directories (the latter is what the parser cares
+about). Already gitignored.
+
+Once the copy is done, **re-run the parser locally** to confirm:
+```bash
+cd ~/claude/elden-ring
+# Find the right chr-extracted root inside data/raw/chr/ — likely:
+python3 tools/parse_taes.py --source data/raw/chr/chr-extracted --workers 32
+# Or with whatever the actual subdir name is. Sentinel-only first:
+python3 tools/parse_taes.py --sentinel-only
+```
+Expected wall time: ~60 sec local vs the 51 min we paid over SMB.
+
+This unblocks fast iteration if any parser bug needs fixing, AND
+unblocks Phase 3 Step 1 work without needing the station online.
+
+After local re-run validates the database is unchanged from
+`data/parry_data.json` (it should — Codex's SMB output was sound), the
+real next step is:
+
 Phase 3 Step 1: probe v6 design + first MVP audio-cue plumbing.
 Per PHASE3-PLAN.md and SESSION-ASKS.md, this means:
 
