@@ -14,7 +14,7 @@
 ; anim-time field, and verifies predicted parry windows match within ±11 ms.
 
 [output]
-log_dir = D:\parry-tell-logs\
+log_dir = C:\Projects\elden-ring\logs\
 session_name = qualification
 
 [capture]

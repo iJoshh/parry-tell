@@ -14,7 +14,7 @@
 ; deltas with database-predicted parry windows.
 
 [output]
-log_dir = D:\parry-tell-logs\
+log_dir = C:\Projects\elden-ring\logs\
 session_name = discovery-stormveil-1
 
 [capture]
