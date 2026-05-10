@@ -30,9 +30,9 @@ from typing import Iterable, Iterator, Optional
 # Magic numbers (must match probe/probe.cpp)
 # ---------------------------------------------------------------------------
 
-SRD0_MAGIC = 0x53524430  # 'SRD0' (little-endian read of bytes 'S','R','D','0')
-MAN0_MAGIC = 0x304E414D  # 'MAN0'
-PTS0_MAGIC = 0x30535450  # 'PTS0' — sample payload header
+SRD0_MAGIC = 0x30445253  # 'SRD0' little-endian (matches probe.cpp SAMPLE_RECORD_MAGIC)
+MAN0_MAGIC = 0x304E414D  # 'MAN0' little-endian (matches probe.cpp MANIFEST_MAGIC)
+PTS0_MAGIC = 0x30535450  # 'PTS0' little-endian (matches probe.cpp SAMPLE_MAGIC)
 
 # Region IDs from RegionId enum in probe.cpp
 REGION_NAMES = {
