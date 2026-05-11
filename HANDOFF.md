@@ -38,53 +38,61 @@ OBS recording of run 1: `/mnt/station-projects/elden-ring/logs/2026-05-11 13-01-
 - tools/inspect_capture.py for diagnostic dumps when qualification FAILs
 - tools/station-ssh.sh password-auth helpers with endpoint+flag-injection guards
 
-## What's broken (the two real bugs)
+## What's broken — one underlying issue with three surface symptoms
 
-### Bug A: qualification_nearest picks NPCs
+**Root cause:** the probe's ChrIns field offset table is stale for ER 2.6.1.
+Identity fields (f038, f060, f064 etc.) are correct — they give us clean
+c-id lookups — but every "behavioral" field offset appears wrong:
 
-probe.cpp:1921 `qualification_nearest` ranks all roster entries by distance,
-no hostility filter. NPCs (graces, summon signs, blacksmiths if nearby) and
-non-combat entities are typically closer than the enemy you're actually
-fighting. Result: focus alternates between the NPC at f060=10003000 (c1000)
-and the actual combat enemy at f060=43823010 (c4382).
+### Symptom 1: position offset wrong
 
-Fix candidates:
-1. Hostility flag: find an offset on ChrIns that distinguishes hostile from
-   neutral. Cheat Engine archaeology needed.
-2. Category blacklist: skip known non-combat c-id ranges (c0XXX-c1XXX cover
-   most NPCs). Less precise but easy.
-3. Stable focus: once the probe picks an enemy in qualification mode, keep
-   focus on that handle for the whole session (or until it despawns).
-   Simplest but loses lock-on responsiveness.
+probe.cpp:173 `PLAYER_INS_POS_X = 0x6C0`. Verified against
+qualification-20260511-133002.bin chr_ins_root payload:
 
-### Bug B: enemy anim_id always reads 0
+| Source | x | y | z |
+|---|---|---|---|
+| `chr_ins + 0x6C0` (what probe reads) | 1.48 | 3.29 | 4.95 |
+| `chr_ins + 0x80` (looks like real world coord) | 80.82 | -97.56 | -57.73 |
+| player_pos (probe header) | 32.42 | 106.60 | 111.12 |
 
-probe.cpp:1398: `SafeRead<uint32_t>(time_act + Off::TIME_ACT_ANIM_ID, &s->anim_id)`
-where `TIME_ACT_ANIM_ID = 0xD0`. For the player this returns valid anim_ids.
-For enemies, always returns 0.
+None of these agree. The values at +0x6C0 look like motion deltas or
+quaternion components, not world position. Distance ranking against player
+is meaningless until this is fixed.
 
-Evidence: `time_act_module` region IS captured (8KB payload). The bytes at
-0x20 are NaN, 0x24-0x2C are 0.0/0.0/1.0, 0xD0 is 0. This looks like the
-OUTER TimeAct module, not the active inner TimeAct that holds the running
-animation.
+Critical consequence: Josh fought ONLY ONE enemy (a Godrick Knight) for the
+entire ~71-second session, and the probe still rotated focus across 3
+different chr_ins. The "nearest" picker is comparing garbage values. The
+c4382 Knight got focus for only 1450 rows (~16s) out of 7137 total focused
+samples. The other 5687 rows focused on background entities Josh never
+saw or interacted with.
 
-8 different `time_act_child` regions ARE captured per enemy (8 of region 4).
-These are likely the per-track active TimeAct sub-structs. One of them
-contains the actual animation. Need to determine:
-1. Which of the 8 children has the active anim (probably the one not at
-   region_base==chr_ins, but needs verification)
-2. What offset within the child contains anim_id (probably not 0xD0)
+### Symptom 2: enemy anim_id always reads 0
 
-Cheat Engine work: find a known enemy at a known anim, scan for the anim_id
-value within its memory near where the time_act_child points.
+probe.cpp:1398 reads `time_act + 0xD0`. For the player this returns valid
+anim_ids. For enemies, always 0. The time_act_module IS captured (region 2,
+8KB payload), but its bytes at 0x20-0x2C are NaN/0.0/0.0/1.0 — uninitialized
+or "outer" struct, not the active child.
 
-### Bug C (low priority): lock-on detection broken
+8 time_act_child regions are captured per enemy. Likely the active anim
+lives in one of them at a different offset than 0xD0.
 
-Lock-on read from PlayerIns + 0x6A0 returns a pointer-shaped value, not a
-game handle. Doesn't match any enemy handle in work[], so focus_reason
-defaults to 3 (nearest) not 1 (lock_on). With Bug A active, makes Bug A
-worse. Should fix once we have a better understanding of the PlayerIns
-struct in 2.6.1.
+### Symptom 3: lock-on detection broken
+
+probe.cpp:1731 reads `playerLockHandle` from PlayerIns + 0x6A0. Returns a
+pointer-shaped value (`0x7FF3073CBB60`), not a game handle integer. The
+value is constant across the entire capture even though Josh's actual
+lock-on target was an active enemy. Result: focus_reason=3 (nearest)
+instead of 1 (lock_on), which would have bypassed the broken nearest
+ranking entirely.
+
+### What v6.1 + v6.1.1 actually fixed
+
+- WCM roster init now works (60s grace + F11 retry)
+- Player chr_ins is excluded from the nearest-enemy picker
+- Lesser-tier decimation no longer inflates enemy_record_count
+
+These are real fixes and unblock progress, but the captured data is still
+not usable for qualification PASS until the offsets above are corrected.
 
 ## Files modified today
 
@@ -114,18 +122,34 @@ log during debug (sudo cat + bash -x trace). Rotate it at end of session.
 
 ## Next session
 
-Pick ONE bug to investigate at a time:
+The 89 MB qualification-20260511-133002.bin has all the data we need to
+fix all three offset bugs without re-running the game:
 
-- **Bug B (anim_id)** is the higher-leverage fix — without it, no
-  qualification PASS is possible regardless of focus picker.
-- **Bug A (focus picker)** is less critical if Bug B is fixed because the
-  Knight is in the roster and we can analyze it from the lesser-tier slots.
+**Position offset (Symptom 1):** the chr_ins_root region (2048 bytes) for
+each enemy contains the full first 2KB of the ChrIns. Scan for the offset
+that gives the Knight's known world position. Cross-reference against
+DSMapStudio or community ChrIns layouts for ER 2.6.1. The +0x80 hit found
+during analysis is a candidate but might be skeleton-root not gameplay-pos.
 
-For Bug B investigation, the existing `time_act_child` regions in
-qualification-20260511-133002.bin already contain the answer — scan the
-8 children for one that has a non-zero u32 at some offset that correlates
-with the c4382 instance's expected anim ids (use the existing c4382
-parry_data.json animation list as targets to scan for).
+**Anim_id offset (Symptom 2):** the 8 time_act_child regions per enemy
+each carry 256 bytes. The c4382 Knight at chr_ins 0x7FF43AE834F0 has 1450
+focused samples — its anim_id was definitely non-zero at some point.
+Scan the 256-byte payloads for u32 values matching c4382's documented
+parry-window anim_ids (in data/parry_data.json under characters.c4382).
+
+**Lock-on offset (Symptom 3):** PlayerIns + 0x6A0 returns a pointer not
+a handle. Either 0x6A0 is wrong, or the field IS a pointer-to-target-struct
+that needs one more dereference to get the handle. Check DSMapStudio's
+PlayerIns layout for the actual target-handle slot.
+
+Saving and analyzing these offset corrections does NOT require Josh to
+play more. The existing capture is a fixture — fix the offsets, re-run
+the analyzer against the same capture, and verify by checking the
+extracted anim_ids match the Knight's known parry-window anim_ids in
+parry_data.json.
+
+Only AFTER offsets are fixed should we ask Josh for another live capture
+to validate the end-to-end qualification PASS.
 
 ## Standing constraints (unchanged)
 
