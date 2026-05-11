@@ -266,8 +266,24 @@ def _parse_sample(payload: bytes) -> Sample:
         adaptive_step=adaptive_step,
     )
 
+    # 2026-05-11: the probe (v6.0 and v6.1) has a count-vs-payload mismatch
+    # where enemy_count in the PTS0 header is the count of enemy SLOTS the
+    # snapshot considered (including silently-skipped lesser-tier decimations
+    # at probe.cpp:2047), while the bytes on disk only contain the records
+    # that were actually emitted. So enemy_count is an UPPER BOUND, not an
+    # exact count. Stop reading enemies when bytes run out instead of erroring.
+    # When the probe is fixed to write the true count this loop will still
+    # work correctly; the early-exit is just defensive.
     for _ in range(enemy_count):
-        sample.enemies.append(_parse_enemy(cur))
+        if cur.pos >= len(cur.buf):
+            break
+        try:
+            sample.enemies.append(_parse_enemy(cur))
+        except ParseError:
+            # Partial enemy record (probe truncated mid-write). Stop here;
+            # caller can inspect sample.enemy_record_count vs len(enemies) to
+            # detect the discrepancy if it matters.
+            break
     return sample
 
 

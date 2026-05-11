@@ -1813,6 +1813,11 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
                 uintptr_t chrIns = 0;
                 if (!SafeRead<uintptr_t>(slotPtr, &chrIns)) continue;
                 if (!LooksLikeUserPtrFast(chrIns)) continue;
+                // v6.1.1: skip the player chr_ins. The WCM roster includes the
+                // player as an entity (the player IS a CharaIns); without this
+                // exclusion qualification_nearest picks the player as the
+                // "closest enemy" because distance to self is zero.
+                if (chrIns == playerChrIns) continue;
                 uintptr_t handleField = chrIns + Off::CHR_INS_HANDLE;
                 uint64_t h = 0;
                 if (!SafeRead<uint64_t>(handleField, &h)) continue;
@@ -1859,6 +1864,8 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
                 uintptr_t chrIns = 0;
                 if (!SafeRead<uintptr_t>(slotPtr, &chrIns)) continue;
                 if (!LooksLikeUserPtrFast(chrIns)) continue;
+                // v6.1.1: skip the player chr_ins (see priority-pass note).
+                if (chrIns == playerChrIns) continue;
                 uintptr_t handleField = chrIns + Off::CHR_INS_HANDLE;
                 uint64_t h = 0;
                 if (!SafeRead<uint64_t>(handleField, &h)) continue;
@@ -2042,9 +2049,15 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
         bool incTier3   = ShouldEmitTier3(fakeEs, tick, g_cfg.mode, adaptiveStep);
         bool incFocus32 = s.is_focused;     // emphasized 32-byte region only on focused
         // For lesser-class enemies we also gate Tier 1+2 by decimation.
+        // v6.1.1: previously returned true (counting as "written") to silently
+        // skip decimation; but the caller increments writtenEnemies on true,
+        // which inflated the on-disk enemy_count beyond what was actually
+        // serialized. Return a sentinel-indicating-skip instead by returning
+        // false; the analyzer-side count needs the actual emitted record
+        // total to match the bytes that follow.
         if (s.cls == ENEMY_CLASS_LESSER &&
             !ShouldEmitLesserT12(fakeEs, tick)) {
-            return true;       // skip silently — lesser Tier 1+2 at 10 Hz
+            return false;      // skip silently — lesser Tier 1+2 at 10 Hz
         }
         return WriteEnemyRecord(w, s, incTier3, incFocus32, drop_broad_sweep);
     };
