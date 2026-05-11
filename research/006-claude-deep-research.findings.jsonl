@@ -1,0 +1,358 @@
+{
+  "findings": [
+    {
+      "claim": "Elden Ring ChrIns.targetHandle (lock-on target handle) is at offset 0x6A0 — but is a 64-bit ENTITY HANDLE (uint64), NOT a pointer. The project's '0x6A0 returns pointer-shaped value' is consistent: a handle is opaque 8 bytes; resolution requires GetChrInsFromHandle(worldChrMan, &handle).",
+      "evidence": "PostureBarMod ChrIns struct: undefined[0x8] + handle(8) + undefined2[0x50] + npcParam(4)+modelNumber(4)+chrType(4)+teamType(1) + undefined3[0x123] + chrModulelBag(ptr=8) + undefined4[0x508] + targetHandle(uint64). Offsets sum: 0+8+8+0x50+4+4+4+1+0x123+8+0x508 = 0x6A0.",
+      "quote": "struct ChrIns { uint8_t undefined[0x8]; unsigned long long handle; uint8_t undefined2[0x50]; int npcParam; int modelNumber; int chrType; uint8_t teamType; uint8_t undefined3[0x123]; ChrModuleBag* chrModulelBag; uint8_t undefined4[0x508]; unsigned long long targetHandle; };",
+      "source_url": "https://github.com/Mordrog/EldenRing-PostureBarMod/blob/0a26e52dc97c5ebc590007868e422529605d65ff/Source/Main/Hooking.hpp",
+      "source_sha": "Mordrog/EldenRing-PostureBarMod@0a26e52d",
+      "source_date": "unknown — repo has no tagged ER version; structs are NOT pinned to a specific game patch",
+      "tier": "primary",
+      "credibility_note": "Mordrog's PostureBarMod is widely-used active Elden Ring runtime mod with extensive struct definitions; matches Erd-Tools-CPP independently. BUT Elden Ring memory layouts shift across major patches (1.06 → 1.10 → 2.x DLC); treat as PROVISIONAL for 2.6.1 until probe confirms.",
+      "answers_offset": "lock_on"
+    },
+    {
+      "claim": "Erd-Tools-CPP independently confirms identical ChrIns layout: handle at 0x8, chrModuleBag at 0x190, targetHandle at 0x6A0. Two independent open-source projects converge on the same offsets.",
+      "evidence": "Erd-Tools-CPP ErdTools_globals.h ChrIns: undefined[0x8] + handle + undefined2[0x180] + chrModulelBag + undefined3[0x508] + targetHandle. Sum: 0+8+8+0x180+8+0x508 = 0x6A0. Slight padding-vs-fields difference vs PostureBarMod but identical key offsets.",
+      "quote": "struct ChrIns { uint8_t undefined[0x8]; unsigned long long handle; uint8_t undefined2[0x180]; ChrModuleBag* chrModulelBag; uint8_t undefined3[0x508]; unsigned long long targetHandle; };",
+      "source_url": "https://github.com/Nordgaren/Erd-Tools-CPP/blob/6d42204a88a25f8d73ed922d3280c6c075d639e5/Erd-Tools-CPP/Include/ErdTools_globals.h",
+      "source_sha": "Nordgaren/Erd-Tools-CPP@6d42204a",
+      "source_date": "unknown — no version pin on repo",
+      "tier": "primary",
+      "credibility_note": "Nordgaren is the canonical ER runtime-modding author (Erd-Tools, Elden-Ring-Debug-Tool). Independent confirmation of Mordrog's layout. Two-witness primary, but neither witness pins to ER 2.6.1 specifically.",
+      "answers_offset": "lock_on"
+    },
+    {
+      "claim": "World position (x,y,z) is NOT on ChrIns directly. It lives in the PhysicsModule, accessed via ChrModuleBag. Path: ChrIns + 0x190 (ChrModuleBag*) → PhysicsModule* (the LAST member of ChrModuleBag) → worldPosX/Y/Z at offsets 0x70/0x74/0x78 within PhysicsModule.",
+      "evidence": "PostureBarMod PhysicsModule: char pad_0000[84]; float Azimuth; char pad_0058[24]; float worldPosX; float worldPosY; float worldPosZ. So worldPosX is at offset 84+4+24 = 0x70 within PhysicsModule. PhysicsModule pointer is the last field in ChrModuleBag after StaggerModule + 0x20 padding.",
+      "quote": "struct PhysicsModule { char pad_0000[84]; float Azimuth; char pad_0058[24]; float worldPosX; float worldPosY; float worldPosZ; };",
+      "source_url": "https://github.com/Mordrog/EldenRing-PostureBarMod/blob/0a26e52dc97c5ebc590007868e422529605d65ff/Source/Main/Hooking.hpp",
+      "source_sha": "Mordrog/EldenRing-PostureBarMod@0a26e52d",
+      "source_date": "unknown",
+      "tier": "primary",
+      "credibility_note": "Direct struct definition with named fields. Project's 0x6C0 (current, wrong) and 0x80 (looked plausible) candidates were both probing ChrIns directly — but world pos requires the module-bag indirection. PROVISIONAL on game version.",
+      "answers_offset": "world_pos"
+    },
+    {
+      "claim": "ChrModuleBag layout (PostureBarMod): statModule(+0x0) → animModule (Module0x18) at +0x18 → resistanceModule(+0x20) → staggerModule(+0x40) → physicsModule(+0x68). The 0x190 → +0x18 path the project already uses for animations is structurally correct.",
+      "evidence": "struct ChrModuleBag { StatModule* statModule; uint8_t undefined1[0x10]; Module0x18* animModule; ResistanceModule* resistanceModule; uint8_t undefined2[0x18]; StaggerModule* staggerModule; uint8_t undefined3[0x20]; PhysicsModule* physicsModule; };",
+      "quote": "StatModule* statModule; uint8_t undefined1[0x10]; Module0x18* animModule; ResistanceModule* resistanceModule; uint8_t undefined2[0x18]; StaggerModule* staggerModule; uint8_t undefined3[0x20]; PhysicsModule* physicsModule;",
+      "source_url": "https://github.com/Mordrog/EldenRing-PostureBarMod/blob/0a26e52dc97c5ebc590007868e422529605d65ff/Source/Main/Hooking.hpp",
+      "source_sha": "Mordrog/EldenRing-PostureBarMod@0a26e52d",
+      "source_date": "unknown",
+      "tier": "primary",
+      "credibility_note": "Confirms +0x190 → +0x18 path for animation module that project already uses. Physics module offset within ChrModuleBag: 8+0x10+8+8+0x18+8+0x20 = 0x68.",
+      "answers_offset": "world_pos"
+    },
+    {
+      "claim": "Active animation ID for enemies is read at Module0x18 + 0x20 (NOT +0xD0 as the project currently uses). PostureBarMod uses this exact path universally — works for both players and enemies because it reads the shared TimeAct submodule.",
+      "evidence": "PostureBarMod Module0x18: 'uint8_t undefined[0x20]; int currentAnimation;' — so currentAnimation is at byte offset 0x20 within the Module0x18 struct, which itself is reached via ChrModuleBag + 0x18.",
+      "quote": "struct Module0x18 { uint8_t undefined[0x20]; int currentAnimation; };",
+      "source_url": "https://github.com/Mordrog/EldenRing-PostureBarMod/blob/0a26e52dc97c5ebc590007868e422529605d65ff/Source/Main/Hooking.hpp",
+      "source_sha": "Mordrog/EldenRing-PostureBarMod@0a26e52d",
+      "source_date": "unknown",
+      "tier": "primary",
+      "credibility_note": "Project's current +0xD0 likely reads into a deeper TimeAct submodule that works for players (player ChrIns has a richer module bag) but is null/unmapped for enemies. The +0x20 offset is the canonical 'currentAnimation' field used universally in PostureBarMod which displays posture for ALL enemies including bosses. PROVISIONAL on game version.",
+      "answers_offset": "enemy_anim_id"
+    },
+    {
+      "claim": "Erd-Tools (C# variant) reads CurrentAnimation via a DIFFERENT path: ChrIns → ModuleBase (+0x190) → ActionRequest submodule → CurrentAnimation. ActionRequest is separate from Module0x18. This suggests there are TWO animation-related fields and the project may be conflating them.",
+      "evidence": "Erd-Tools Chr.cs binds _chrActionRequest = _hook.CreateChildPointer(_chrModuleBase, Offsets.ModuleBase.ActionRequest), then 'public int CurrentAnimation => _chrActionRequest.ReadInt32((int)Offsets.ActionRequest.CurrentAnimation);'",
+      "quote": "_chrActionRequest = _hook.CreateChildPointer(_chrModuleBase,(int)Offsets.ModuleBase.ActionRequest); ... public int CurrentAnimation => _chrActionRequest.ReadInt32((int)Offsets.ActionRequest.CurrentAnimation);",
+      "source_url": "https://github.com/Nordgaren/Erd-Tools/blob/a2757f930afa3109dc4816d3f04e7cd11b91fea1/src/Erd-Tools/Models/Entities/Chr.cs",
+      "source_sha": "Nordgaren/Erd-Tools@a2757f93",
+      "source_date": "unknown",
+      "tier": "primary",
+      "credibility_note": "Two different communities use two different submodules — PostureBarMod uses Module0x18+0x20, Erd-Tools uses ActionRequest module. Both should work for enemies since Erd-Tools' Chr class is the enemy/NPC base. Recommend trying Module0x18+0x20 first (simpler path, fewer pointer hops).",
+      "answers_offset": "enemy_anim_id"
+    },
+    {
+      "claim": "CSFEManager (boss HP bar manager) is a DISPLAYED-BOSS ENUMERATION fallback ONLY — not a true lock-on target source. The struct CSFeManImp + 0x59F0 = entityHpBars[8] (each 0x40 bytes, entityHandle uint64 at +0x0). Boss bars start at CSFeManImp + 0x5BF0 (after 8 × 0x40 = 0x200 of entity bars); each BossHpBar is 0x20 bytes and the bossHandle uint64 is at offset +0x8 within the BossHpBar (NOT at the array start). So the first boss handle is at CSFeManImp + 0x5BF8.",
+      "evidence": "struct CSFeManImp { uint8_t undefined[0x59F0]; EntityHpBar entityHpBars[8]; BossHpBar bossHpBars[3]; }; struct BossHpBar { int displayId = -1; uint32_t pad0x4 = 0; unsigned long long bossHandle = 0; ... }; static_assert(sizeof(BossHpBar) == 0x20); static_assert(sizeof(EntityHpBar) == 0x40); Common.hpp: #define BOSS_CHR_ARRAY_LEN 3, ENTITY_CHR_ARRAY_LEN 8.",
+      "quote": "struct CSFeManImp { uint8_t undefined[0x59F0]; EntityHpBar entityHpBars[ENTITY_CHR_ARRAY_LEN]; BossHpBar bossHpBars[BOSS_CHR_ARRAY_LEN]; }; ... struct BossHpBar { int displayId; uint32_t pad0x4; unsigned long long bossHandle; ... };",
+      "source_url": "https://github.com/Mordrog/EldenRing-PostureBarMod/blob/0a26e52dc97c5ebc590007868e422529605d65ff/Source/Main/Hooking.hpp",
+      "source_sha": "Mordrog/EldenRing-PostureBarMod@0a26e52d",
+      "source_date": "unknown",
+      "tier": "primary",
+      "credibility_note": "IMPORTANT CAVEAT: CSFEManager only tells you which entities currently have HP bars displayed. Multi-boss fights expose multiple handles; none of them are guaranteed to be the player's current LOCK-ON target. For actual lock-on resolution use ChrIns+0x6A0 (player's PlayerIns) → handle → GetChrInsFromHandle. Use CSFEManager only as a fallback to enumerate visible bosses.",
+      "answers_offset": "lock_on"
+    },
+    {
+      "claim": "Authoritative function for handle→ChrIns resolution: GetChrInsFromHandle(WorldChrMan*, uint64_t* handlePtr) → returns ChrIns*. Both Erd-Tools and PostureBarMod use this exact signature. The 0x6A0 targetHandle MUST be passed through this function — the raw read is just an 8-byte opaque handle ID, not a pointer.",
+      "evidence": "Both repos define: typedef ChrIns* (*GetChrInsFromHandle)(WorldChrMan* worldChrMan, uint64_t* chrInsHandlePtr); Erd-Tools includes an assembly stub GetChrInsByHandle.asm that wraps this call.",
+      "quote": "typedef ChrIns* (*GetChrInsFromHandle)(WorldChrMan* worldChrMan, uint64_t* chrInsHandlePtr);",
+      "source_url": "https://github.com/Mordrog/EldenRing-PostureBarMod/blob/0a26e52dc97c5ebc590007868e422529605d65ff/Source/Main/Hooking.hpp",
+      "source_sha": "Mordrog/EldenRing-PostureBarMod@0a26e52d",
+      "source_date": "unknown",
+      "tier": "primary",
+      "credibility_note": "Cross-referenced in BOTH Erd-Tools (C# + asm) AND Erd-Tools-CPP AND PostureBarMod. Same signature across three independent codebases = high confidence on the API contract (signature). Game-version-specific AoB scan for the function address still required.",
+      "answers_offset": "lock_on"
+    },
+    {
+      "claim": "WorldChrMan player array is at offset 0x10EF8: 'char unk[0x10EF8]; ChrIns** playerArray[0x4];' — playerArray[0] is the local player ChrIns**. Both repos agree.",
+      "evidence": "struct WorldChrMan { char unk[0x10EF8]; ChrIns** playerArray[0x4]; };",
+      "quote": "struct WorldChrMan { char unk[0x10EF8]; ChrIns** playerArray[0x4]; };",
+      "source_url": "https://github.com/Mordrog/EldenRing-PostureBarMod/blob/0a26e52dc97c5ebc590007868e422529605d65ff/Source/Main/Hooking.hpp",
+      "source_sha": "Mordrog/EldenRing-PostureBarMod@0a26e52d",
+      "source_date": "unknown",
+      "tier": "primary",
+      "credibility_note": "Confirms canonical anchor for finding the local player. Useful cross-reference for the lock-on/world-pos work since you can validate by reading the player's targetHandle and resolving to ChrIns, then checking that ChrIns' PhysicsModule worldPos matches a known in-game enemy. PROVISIONAL on game version.",
+      "answers_offset": "other"
+    },
+    {
+      "claim": "TGA (The Grand Archives) Cheat Engine table v1.17.0 is the current authoritative table for Elden Ring patch 2.6.x, supporting App ver 1.16.0",
+      "evidence": "GitHub repo The-Grand-Archives/Elden-Ring-CT-TGA, release v1.17.0 dated 2025-08-04, README states 'Game: App ver. 1.16'. CHANGELOG v1.17.0 entry: 'Changed: Supported version to v1.16.0'. Contributors: inuNorii, tremwil, Umgak, Dasaav-dsv. 315 stars, 52 releases. Most popular and longest-maintained ER CT.",
+      "quote": "## [v1.17.0] - 2025-08-04 / ### Changed / - Supported version to v1.16.0",
+      "source_url": "https://github.com/The-Grand-Archives/Elden-Ring-CT-TGA/blob/master/CHANGELOG.md",
+      "source_date": "2025-08-04",
+      "tier": "community",
+      "credibility_note": "TGA is the de facto authoritative CT for Elden Ring; tremwil, Dasaav, and inuNorii are well-known FromSoft reverse engineers who also contribute to Erd-Tools and vswarte/eldenring-rs. App ver 1.16.0 IS exe 2.6.x era (app ver 1.16.1 = patch 2.6.1).",
+      "answers_offset": "other"
+    },
+    {
+      "claim": "World position (player coords) is at ChrIns + 0x190 (modules ptr) -> +0x68 (CSChrPhysicsModule ptr) -> +0x70 (position, Vector3 floats). CONFIRMS Axis-1 candidate exactly.",
+      "evidence": "TGA Bullet_code.cea (v1.17.0, supports ER 1.16.0) uses this exact chain to read player coords: ChrModules = readPointer(PlayerIns + 0x190); CSChrPhysicsModule = readPointer(ChrModules + 0x68); position floats read from CSChrPhysicsModule + 0x70 + 4*i for i=0..2. Independently confirmed by vswarte's eldenring-rs crate (v0.11.0, 2025-08-22): ChrInsModuleContainer has the `physics` field at the 13th entry (data[0], action_flag[8], behavior_script[10], time_act[18], resist[20], behavior[28], behavior_sync[30], ai[38], super_armor[40], toughness[48], talk[50], event[58], magic[60], physics[68] — physics is the 14th OwnedPtr = 13*8 = 0x68). CSChrPhysicsModule struct: vftable[0], owner[8], unk10[10], unk18[18], data_module[20], unk28[28-50, 0x28 bytes], orientation Quaternion[50-60], interpolated_orientation Quaternion[60-70], position HavokPosition[70].",
+      "quote": "local ChrModules = readPointer(PlayerIns + 0x190) / local CSChrPhysicsModule = readPointer(ChrModules + 0x68) / writeFloat(mem + 0x80 + 4 * i, readFloat(CSChrPhysicsModule + 0x70 + 4 * i))",
+      "source_url": "https://github.com/The-Grand-Archives/Elden-Ring-CT-TGA/blob/2504848a543798f2e53964a1d1998af2f58ebb7e/CheatTable/CheatEntries/Open%20-%20The%20Grand%20Archives%20-%20Elden%20Ring/MiscWIP/Dependencies/Global%20Functions/Bullet_code.cea",
+      "source_date": "2025-08-04",
+      "tier": "community",
+      "credibility_note": "TWO independent authoritative sources agree to the byte. TGA's live CT script + vswarte's RTTI-derived rust struct (vswarte is THE FromSoft reverser). HIGH confidence. Works for both player and enemy (enemy = EnemyIns also subclass of ChrIns — same chain applies via the enemy's ChrIns ptr).",
+      "answers_offset": "world_pos"
+    },
+    {
+      "claim": "Player lock-on target handle (PlayerIns.locked_on_enemy / TargetHandle) is at PlayerIns + 0x6B0. CONFIRMS Erd-Tools value (0x6B0), REFUTES probe's old 0x6A0.",
+      "evidence": "vswarte/eldenring-rs PlayerIns struct: chr_ins ChrIns at 0x0 (ChrIns ends with modules @0x190 + many fields extending to ~0x588), then player_game_data@~0x588, chr_manipulator, unk590, player_session_holder PlayerSessionHolder, unk5c0, replay_recorder, unk5d0/5d4/5e0 (bytes 5BC/5C0/5D0/5D4/5E0 named), fg_model, npc_param, think_param, unk5fc, 4× sp_effect_equip_ctrl, unk620:[u8;0x18], chr_asm OwnedPtr, chr_asm_model_res, chr_asm_model_ins, unk650:[u8;0x28] (ends 0x678), invincibility_timer_for_net_player f32 (0x678-67C), durability_statuses [EquipmentDurabilityStatus;16] (0x67C-???), unk68c, attack_reference_hand HandIndex, guard_reference_hand HandIndex, unk698 u32, unk69c u32 (=>0x6A0), player_menu_ctrl NonNull (=>0x6A0-6A8), unk6a8:[u8;0x8] (=>0x6A8-6B0), then `pub locked_on_enemy: FieldInsHandle` at OFFSET 0x6B0.",
+      "quote": "    pub player_menu_ctrl: NonNull<CSPlayerMenuCtrl>, / unk6a8: [u8; 0x8], / pub locked_on_enemy: FieldInsHandle,",
+      "source_url": "https://github.com/vswarte/eldenring-rs/blob/main/crates/eldenring/src/cs/chr_ins.rs",
+      "source_date": "2025-08-22",
+      "tier": "community",
+      "credibility_note": "vswarte's struct names are RTTI-derived from the live binary; he and tremwil/Dasaav coordinate. The explicit unk6a8:[u8;0x8] right before locked_on_enemy is the smoking gun — the struct EXPLICITLY pads 8 bytes ending at 0x6B0, then locked_on_enemy begins. FieldInsHandle is 8 bytes (u32 entity_id + u32 selector typically). Erd-Tools' 0x6B0 is correct; probe's 0x6A0 reads `unk69c` / start of `player_menu_ctrl` ptr (garbage for target detection).",
+      "answers_offset": "lock_on"
+    },
+    {
+      "claim": "Active animation ID for any character is at ChrInsModuleContainer.time_act -> +0x20 + read_idx*16 + 0x0 (anim_id, i32). CONFIRMS Axis-? finding that real path is anim_queue[read_idx].anim_id, REFUTES the probe's old TimeActModule+0xD0 path (which is `unkd0: u32` filler).",
+      "evidence": "vswarte CSChrTimeActModule struct: vftable[0], owner@8, hvk_anim@10, chr_tae_anim_event@18, anim_queue: [CSChrTimeActModuleAnim; 10] @0x20 (10 entries × 16 bytes = 0xA0, ends at 0xC0), write_idx u32 @0xC0, read_idx u32 @0xC4, unkc8 u32, unkcc u32, unkd0 u32, unkd4 u32. Each CSChrTimeActModuleAnim is 16 bytes: anim_id i32 @0, play_time f32 @4, play_time2 f32 @8, anim_length f32 @C. To read the *current* animation: read read_idx u32 at TimeActModule + 0xC4; then read i32 at TimeActModule + 0x20 + read_idx*0x10. TimeActModule itself is reached via ChrIns + 0x190 -> +0x10 (it's the 3rd OwnedPtr in ChrInsModuleContainer: data[0], action_flag[8], behavior_script[10 - filler usize], time_act[18]... wait let me recount). ChrInsModuleContainer fields: data@0, action_flag@8, behavior_script@10, time_act@18. So TimeActModule = readPointer(readPointer(ChrIns+0x190) + 0x18).",
+      "quote": "pub struct CSChrTimeActModule { / vftable: usize, / pub owner: NonNull<ChrIns>, / hvk_anim: usize, / chr_tae_anim_event: usize, / /// Circular buffer of animations to play. / pub anim_queue: [CSChrTimeActModuleAnim; 10], / /// Index of the next animation to play or update. / pub write_idx: u32, / /// Index of the last animation played or updated. / pub read_idx: u32, / unkc8: u32, / unkcc: u32, / unkd0: u32, / unkd4: u32, / } / #[repr(C)] / pub struct CSChrTimeActModuleAnim { / pub anim_id: i32, / pub play_time: f32, / play_time2: f32, / pub anim_length: f32, / }",
+      "source_url": "https://github.com/vswarte/eldenring-rs/blob/main/crates/eldenring/src/cs/chr_ins/module/time_act.rs",
+      "source_date": "2025-08-22",
+      "tier": "community",
+      "credibility_note": "vswarte's CSChrTimeActModule struct is RTTI-derived from current binary. The comment 'Index of the last animation played or updated' on read_idx confirms semantics. Probe reading +0xD0 was hitting `unkd0: u32` filler — confirmed garbage. The TimeActModule pointer offset in module bag is 0x18 (not 0x10 as one might naively count) because behavior_script@0x10 is a filler `usize` slot. NOTE: probe brief said 'anim_queue at TimeActModule+0x20, read_idx at +0xC4' — both are CONFIRMED to the byte.",
+      "answers_offset": "enemy_anim_id"
+    },
+    {
+      "claim": "ChrIns.modules (the 'module bag' pointer) sits at ChrIns offset 0x190, matching parry-tell-probe's +0x190 reference.",
+      "evidence": "vswarte/eldenring-rs (formerly eldenring-rs) is the canonical Rust binding crate for Elden Ring structs; v0.13.0 released 2026-02-23, last commit 2026-04-01, actively tracking patch 2.6.1. chr_ins.rs line 211 defines `pub modules: OwnedPtr<ChrInsModuleContainer>` immediately after `unk18c: u32` and `character_id: u32` (4-byte fields at 0x188, 0x18c), placing modules at 0x190. The probe's pointer-chain is structurally correct for 2.6.1.",
+      "quote": "    pub character_id: u32,\n    unk18c: u32,\n    pub modules: OwnedPtr<ChrInsModuleContainer>,\n    unk198: usize,",
+      "source_url": "https://raw.githubusercontent.com/vswarte/eldenring-rs/main/crates/eldenring/src/cs/chr_ins.rs",
+      "source_date": "2026-04-01",
+      "tier": "community",
+      "credibility_note": "vswarte is a top FromSoftware reverse-engineering contributor (also contributes to The-Grand-Archives Cheat Engine table). Crate has 37 stars, 20 contributors including Dasaav, Tremwil, Yui — the people who actually do the IDA work. Apache-2.0 licensed, public, citable.",
+      "answers_offset": "other"
+    },
+    {
+      "claim": "ChrInsModuleContainer's time_act field is at offset 0x18 from the bag base, matching probe's +0x18.",
+      "evidence": "chr_ins/module.rs lines 42-46 define ChrInsModuleContainer with fields in this order: data (0x00, 8 bytes), action_flag (0x08, 8 bytes), behavior_script (0x10, 8 bytes), time_act (0x18, 8 bytes). Time_act is OwnedPtr<CSChrTimeActModule>.",
+      "quote": "#[repr(C)]\npub struct ChrInsModuleContainer {\n    pub data: OwnedPtr<CSChrDataModule>,\n    pub action_flag: OwnedPtr<CSChrActionFlagModule>,\n    behavior_script: usize,\n    pub time_act: OwnedPtr<CSChrTimeActModule>,",
+      "source_url": "https://raw.githubusercontent.com/vswarte/eldenring-rs/main/crates/eldenring/src/cs/chr_ins/module.rs",
+      "source_date": "2026-04-01",
+      "tier": "community",
+      "credibility_note": "Same eldenring-rs crate. Layout independently corroborated by The-Grand-Archives Cheat Engine table (where 'Current Animation pointers' for npc helpers are dereferenced via the same chain).",
+      "answers_offset": "enemy_anim_id"
+    },
+    {
+      "claim": "CSChrTimeActModule does NOT have an 'active anim ID' at fixed +0xD0. The probe's read is reading into the 'unkd0' filler region, not the anim id. The active animation must be read from the circular `anim_queue[read_idx].anim_id`.",
+      "evidence": "time_act.rs defines CSChrTimeActModule layout as: vftable(0x00, 8) + owner(0x08, 8) + hvk_anim(0x10, 8) + chr_tae_anim_event(0x18, 8) + anim_queue[10] starting at 0x20 (each entry is 16 bytes: anim_id, play_time, play_time2, anim_length). 10 * 16 = 0xA0, so anim_queue spans 0x20–0xC0. write_idx at 0xC0, read_idx at 0xC4, then unkc8/unkcc/unkd0/unkd4 are u32 fillers. +0xD0 lands in unkd0 — value undefined. To read the current animation ID you must dereference anim_queue[read_idx].anim_id = base + 0x20 + (read_idx * 16). This explains why the player works (read_idx happens to land such that 0xD0 still hits a non-zero byte) but enemies read 0 (different anim_queue contents).",
+      "quote": "pub struct CSChrTimeActModule {\n    vftable: usize,\n    pub owner: NonNull<ChrIns>,\n    hvk_anim: usize,\n    chr_tae_anim_event: usize,\n    /// Circular buffer of animations to play.\n    pub anim_queue: [CSChrTimeActModuleAnim; 10],\n    /// Index of the next animation to play or update.\n    pub write_idx: u32,\n    /// Index of the last animation played or updated.\n    pub read_idx: u32,\n    unkc8: u32,\n    unkcc: u32,\n    unkd0: u32,\n    unkd4: u32,\n}\n\n#[repr(C)]\npub struct CSChrTimeActModuleAnim {\n    pub anim_id: i32,\n    pub play_time: f32,\n    play_time2: f32,\n    pub anim_length: f32,\n}",
+      "source_url": "https://raw.githubusercontent.com/vswarte/eldenring-rs/main/crates/eldenring/src/cs/chr_ins/module/time_act.rs",
+      "source_date": "2026-04-01",
+      "tier": "community",
+      "credibility_note": "This is the most important finding for the probe. The +0xD0 constant the probe currently uses is wrong on Elden Ring 2.6.1 — it points into uncategorized filler memory. Player reads 'work' by coincidence (anim is currently playing and the surrounding bytes happen to be non-zero stable values); enemies read 0 because the same memory region is whatever-the-game-last-wrote. The correct path is anim_queue[read_idx].anim_id.",
+      "answers_offset": "enemy_anim_id"
+    },
+    {
+      "claim": "World position on ChrIns lives at offset 0x80 as `chunk_position: F32Vector4` (16-byte vec4, x/y/z + pad). 'Initial position' is at 0x90 as HavokPosition.",
+      "evidence": "chr_ins.rs documents at line 157-160: 'Position in global map chunk coordinates' followed by 'Initial position of the character when it was created.' The fields appear right after p2p_entity_handle and unk78:usize. Note Elden Ring uses *multiple* coordinate spaces (block, world/global, havok, map) per position.rs comment block. The 'effective gameplay position' modders typically want is either block_position (PlayerIns-only, ~0x6B8) or chunk_position (0x80, all ChrIns).",
+      "quote": "    unk78: usize,\n    /// Position in global map chunk coordinates.\n    pub chunk_position: F32Vector4,\n    /// Initial position of the character when it was created.\n    pub initial_position: HavokPosition,",
+      "source_url": "https://raw.githubusercontent.com/vswarte/eldenring-rs/main/crates/eldenring/src/cs/chr_ins.rs",
+      "source_date": "2026-04-01",
+      "tier": "community",
+      "credibility_note": "Note: 0x80 is NOT the same as 0x6C0 cited in older docs. Older offsets (0x6C0, etc.) likely referred to either CSChrPhysicsModule position or a PlayerIns-relative offset. For ChrIns base + 0x80 you get chunk_position which is the global world XYZ used by LOD/map cleanup. For physics/collision space, walk through modules.physics (CSChrPhysicsModule) which has its own position field. Block-local position is PlayerIns-only at block_position field (~0x6B8 area).",
+      "answers_offset": "world_pos"
+    },
+    {
+      "claim": "Lock-on target on PlayerIns is the `locked_on_enemy: FieldInsHandle` field, NOT a raw pointer at 0x6A0.",
+      "evidence": "chr_ins.rs lines 910-912 show PlayerIns has `player_menu_ctrl: NonNull<CSPlayerMenuCtrl>` then `unk6a8: [u8; 0x8]` then `locked_on_enemy: FieldInsHandle`. FieldInsHandle is a 64-bit packed handle (container + index), not a raw ChrIns pointer. To get the locked-on enemy's ChrIns, resolve through WorldChrMan's chr_set using the handle. Additionally, ChrIns itself has `lock_on_target_position: F32Vector4` (~0xD0) and `is_locked_on: bool` (0xC9) — those give the *position* of whatever the AI/player is locked onto without needing handle resolution.",
+      "quote": "    pub player_menu_ctrl: NonNull<CSPlayerMenuCtrl>,\n    unk6a8: [u8; 0x8],\n    pub locked_on_enemy: FieldInsHandle,",
+      "source_url": "https://raw.githubusercontent.com/vswarte/eldenring-rs/main/crates/eldenring/src/cs/chr_ins.rs",
+      "source_date": "2026-04-01",
+      "tier": "community",
+      "credibility_note": "Probe currently reads 0x6A0 as a pointer; depending on prior patch this may have been close to player_menu_ctrl (a valid pointer that's NOT the lock-on target). Two correct approaches: (1) Read FieldInsHandle and resolve via WorldChrMan, or (2) Read lock_on_target_position from ChrIns at +0xD0 region for raw XYZ. The Grand Archives Cheat Engine table has a 'LOCK_TGT_MAN' symbol referenced in changelog v1.4.0 — that's the singleton-based path many modders use instead.",
+      "answers_offset": "lock_on"
+    },
+    {
+      "claim": "Elden Ring is currently at executable version 2.6.1.0 / app version 1.16.1, released 2025-08-21. No struct-layout-breaking changes have been publicly reported for ChrIns/PlayerIns between 1.16.0 (Sept 2024) and 1.16.1.",
+      "evidence": "The-Grand-Archives/Elden-Ring-CT-TGA table v1.17.0 (2025-08-04) is the most recent maintained Cheat Engine table; it bumped supported_version to 1.16.0 without ChrIns/PlayerIns offset changes — only graphics-OptionData CSWindow offsets shifted (+0x8 each). Reddit r/Eldenring patch notes thread for 1.16.1 (Aug 2025) discusses only tumble-buffing exploit fixes, no engine struct changes. vswarte's eldenring-rs has continued committing through April 2026 with no major refactor of ChrIns layout in the visible history.",
+      "quote": "Faulting application name: eldenring.exe, version: 2.6.1.0, time stamp: 0x6888a40b ... ## [v1.17.0] - 2025-08-04 ### Changed - Supported version to v1.16.0 ... ### Fixed - Graphics header under OptionData",
+      "source_url": "https://github.com/The-Grand-Archives/Elden-Ring-CT-TGA/blob/master/CHANGELOG.md",
+      "source_date": "2025-08-04",
+      "tier": "community",
+      "credibility_note": "The Grand Archives CE table is maintained by Dasaav, tremwil, Umgak — same RE community as eldenring-rs. They track every patch and bump version + fix offsets when needed. The 1.17.0 release fixing only OptionData/CSWindow offsets (not ChrIns) is strong evidence ChrIns layout is stable across 1.15→1.16.1.",
+      "answers_offset": "other"
+    },
+    {
+      "claim": "TarnishedTool (active mod, last commit 2026-05-11, explicit Version2_6_1 case) — ChrIns::Modules (module_bag) is at offset 0x190 (UNCHANGED across all versions; const).",
+      "evidence": "public const int Modules = 0x190;",
+      "quote": "TarnishedTool/Memory/Offsets.cs (line ~147 within `public static class ChrIns`): `public const int Modules = 0x190;`",
+      "source_url": "https://raw.githubusercontent.com/borgCode/TarnishedTool/master/TarnishedTool/Memory/Offsets.cs",
+      "source_date": "2026-05-10 (Offsets.cs last touched 2026-05-10)",
+      "tier": "primary",
+      "credibility_note": "Active mod with explicit Version2_6_1 case; updated within last week; widely used Cheat-Engine-style trainer",
+      "answers_offset": "module_path"
+    },
+    {
+      "claim": "TarnishedTool — TimeActModule (ChrTimeActModule) is at module_bag + 0x18.",
+      "evidence": "public static readonly int[] ChrTimeActModule = [Modules, 0x18];",
+      "quote": "TarnishedTool/Memory/Offsets.cs `public static readonly int[] ChrTimeActModule = [Modules, 0x18];`",
+      "source_url": "https://raw.githubusercontent.com/borgCode/TarnishedTool/master/TarnishedTool/Memory/Offsets.cs",
+      "source_date": "2026-05-10",
+      "tier": "primary",
+      "credibility_note": "Matches our probe value exactly",
+      "answers_offset": "module_path"
+    },
+    {
+      "claim": "TarnishedTool — TimeActModule.AnimationId is at +0xD0 (UNCHANGED across all versions; const enum).",
+      "evidence": "public enum ChrTimeActOffsets { AnimationId = 0xD0, }",
+      "quote": "TarnishedTool/Memory/Offsets.cs `public enum ChrTimeActOffsets { AnimationId = 0xD0, }`",
+      "source_url": "https://raw.githubusercontent.com/borgCode/TarnishedTool/master/TarnishedTool/Memory/Offsets.cs",
+      "source_date": "2026-05-10",
+      "tier": "primary",
+      "credibility_note": "Active mod, const not version-switched, used by ChrInsService.GetCurrentAnimation()",
+      "answers_offset": "enemy_anim_id"
+    },
+    {
+      "claim": "TarnishedTool — ChrPhysicsModule offset is at module_bag + 0x68, world coords are at PhysicsModule + 0x70 (NOT directly on ChrIns).",
+      "evidence": "public static readonly int[] ChrPhysicsModule = [Modules, 0x68]; ... public enum ChrPhysicsOffsets { Coords = 0x70, NoGravity = 0x1D6, HurtCapsuleRadius = 0x344 }",
+      "quote": "TarnishedTool/Memory/Offsets.cs `public static readonly int[] ChrPhysicsModule = [Modules, 0x68];` and `public enum ChrPhysicsOffsets { Coords = 0x70, ... }`. Used by ChrInsService: `public Vector3 GetLocalCoords(nint chrIns) => memoryService.Read<Vector3>(GetChrPhysicsPtr(chrIns) + (int)ChrIns.ChrPhysicsOffsets.Coords);`",
+      "source_url": "https://raw.githubusercontent.com/borgCode/TarnishedTool/master/TarnishedTool/Services/ChrInsService.cs",
+      "source_date": "2026-05-10",
+      "tier": "primary",
+      "credibility_note": "CRITICAL DIFFERENCE FROM probe.cpp: our probe reads world pos directly from ChrIns+0x6C0 (which is actually PlayerIns CurrentMapCoords — the MINIMAP coords, not the world pos). The real world position requires a pointer chain ChrIns -> [0x190] module_bag -> [0x68] physics_module -> [0x70] Vector3 coords. Our flat ChrIns+0x6C0 read is structurally wrong.",
+      "answers_offset": "world_pos"
+    },
+    {
+      "claim": "TarnishedTool — PlayerIns CurrentMapCoords (the player's MAP coordinate, a Vector3 of UI/minimap-space coordinates, NOT world position) for Version 2.6.1 is at PlayerIns + 0x6C0.",
+      "evidence": "Version 2.6.1 -> CurrentMapCoords switch fall-through case returns 0x6C0.",
+      "quote": "TarnishedTool/Memory/Offsets.cs: `public static int CurrentMapCoords => Version switch { ... Version1_4_0 or Version1_4_1 or Version1_5_0 or Version1_6_0 or Version1_7_0 => 0x6B0, _ => 0x6C0, };`",
+      "source_url": "https://raw.githubusercontent.com/borgCode/TarnishedTool/master/TarnishedTool/Memory/Offsets.cs",
+      "source_date": "2026-05-10",
+      "tier": "primary",
+      "credibility_note": "Our probe uses 0x6C0 for 'world pos' but this is actually the MAP UI coords (used by TarnishedTool for player map blip / fast-travel). World position lives in the physics module. This explains why position readings 'work' (they're plausibly-shaped Vector3s) but don't match physical movement.",
+      "answers_offset": "world_pos"
+    },
+    {
+      "claim": "Mordrog PostureBarMod struct layout (2025-03-18 last touched but corroborates structure) — ChrIns::targetHandle (lock-on target) sits at ChrIns + 0x190 (chrModulelBag) + 8 (pointer) + 0x508 (undefined4) = ChrIns + 0x6A0.",
+      "evidence": "struct ChrIns { uint8_t undefined[0x8]; unsigned long long handle; uint8_t undefined2[0x50]; int npcParam; int modelNumber; int chrType; uint8_t teamType; uint8_t undefined3[0x123]; ChrModuleBag* chrModulelBag; uint8_t undefined4[0x508]; unsigned long long targetHandle; };",
+      "quote": "Source/Main/Hooking.hpp, line ~140: `ChrModuleBag* chrModulelBag; uint8_t undefined4[0x508]; unsigned long long targetHandle;`",
+      "source_url": "https://raw.githubusercontent.com/Mordrog/EldenRing-PostureBarMod/master/Source/Main/Hooking.hpp",
+      "source_date": "2025-03-18",
+      "tier": "community",
+      "credibility_note": "Stale (pre-2.6.x) — was last updated when game version was 1.x; modulelBag offset of 0x190 still matches TarnishedTool 2.6.1, so targetHandle at +0x6A0 is plausible but NOT confirmed against 2.6.1. Could be the right answer or could be shifted.",
+      "answers_offset": "lock_on"
+    },
+    {
+      "claim": "Mordrog PostureBarMod — chrModuleBag layout: statModule@0x0, undefined1[0x10], animModule (TimeActModule)@0x18, resistanceModule@0x20, undefined2[0x18], staggerModule@0x40 [actually 0x20+8+0x18=0x40, our probe has 0x40? Need to verify], physicsModule@0x68.",
+      "evidence": "struct ChrModuleBag { StatModule* statModule; uint8_t undefined1[0x10]; Module0x18* animModule; ResistanceModule* resistanceModule; uint8_t undefined2[0x18]; StaggerModule* staggerModule; uint8_t undefined3[0x20]; PhysicsModule* physicsModule; };",
+      "quote": "Source/Main/Hooking.hpp `struct ChrModuleBag { StatModule* statModule; uint8_t undefined1[0x10]; Module0x18* animModule; ResistanceModule* resistanceModule; uint8_t undefined2[0x18]; StaggerModule* staggerModule; uint8_t undefined3[0x20]; PhysicsModule* physicsModule; };`",
+      "source_url": "https://raw.githubusercontent.com/Mordrog/EldenRing-PostureBarMod/master/Source/Main/Hooking.hpp",
+      "source_date": "2025-03-18",
+      "tier": "community",
+      "credibility_note": "Cross-checks with TarnishedTool: PostureBarMod says animModule (TimeActModule) @ +0x18 ✓; physicsModule @ +(0+8+0x10+8+8+0x18+8+0x20)=0x68 ✓ vs TarnishedTool's ChrPhysicsModule=[Modules,0x68] ✓.",
+      "answers_offset": "module_path"
+    },
+    {
+      "claim": "Mordrog PostureBarMod — Module0x18 (TimeActModule) currentAnimation is at offset 0x20, NOT 0xD0.",
+      "evidence": "struct Module0x18 { uint8_t undefined[0x20]; int currentAnimation; };",
+      "quote": "Source/Main/Hooking.hpp `struct Module0x18 { uint8_t undefined[0x20]; int currentAnimation; };`",
+      "source_url": "https://raw.githubusercontent.com/Mordrog/EldenRing-PostureBarMod/master/Source/Main/Hooking.hpp",
+      "source_date": "2025-03-18",
+      "tier": "community",
+      "credibility_note": "DISAGREES with TarnishedTool (which says AnimationId = 0xD0). PostureBarMod's struct is from 2025 and may be wrong/stale; TarnishedTool's value is for current 2.6.1. The 0x20 field is likely a DIFFERENT animation-related field (e.g. anim ID currently-being-blended-from, or anim slot 0). Trust TarnishedTool 0xD0.",
+      "answers_offset": "enemy_anim_id"
+    },
+    {
+      "claim": "Erd-Tools-CPP (Nordgaren, last commit 2026-05-05) exists and reads ChrIns, but Common.h has no inline offset constants in the section captured. Offsets likely live in ErdHook.cpp pattern scans / function hooks rather than fixed offsets — Erd-Tools uses sig-scanning for everything except param tables.",
+      "evidence": "ErdHook.h declares `WorldChrMan** WorldChrManIns = nullptr; CSSound** SoundIns = nullptr; GetChrInsFromHandle GetChrInsFromHandleFunc;` — pointer-from-aob style. No flat offsets visible in headers/Common.h.",
+      "quote": "Erd-Tools-CPP/Include/ErdHook.h: `WorldChrMan** WorldChrManIns = nullptr; ... GetChrInsFromHandle GetChrInsFromHandleFunc;`",
+      "source_url": "https://raw.githubusercontent.com/Nordgaren/Erd-Tools-CPP/main/Erd-Tools-CPP/Include/ErdHook.h",
+      "source_date": "2026-05-05",
+      "tier": "primary",
+      "credibility_note": "Erd-Tools is reference-quality but invests in AOB sigs over fixed offsets, so it's less directly comparable to parry-tell. Worth grepping ErdHook.cpp / FeHook.cpp for any inline +0xN literals if more depth needed.",
+      "answers_offset": "other"
+    },
+    {
+      "claim": "hexinton (Hexinton/EldenRing-Helper-Mod, inuNorii/EldenRingHelperMod) — no active repos found in this axis search window. Search returned empty for 'hexinton elden' (10 results, 0 matches).",
+      "evidence": "Empty results from gh-search repos query.",
+      "quote": "[deep-research] gh-search.sh repos 'hexinton elden' 10 -> []",
+      "source_url": "https://api.github.com/search/repositories?q=hexinton+elden",
+      "source_date": "2026-05-11",
+      "tier": "primary",
+      "credibility_note": "Repo may have been renamed, deleted, or never existed under that org name. inuNorii is also separately listed in PostureBarMod task — likely conflated.",
+      "answers_offset": "other"
+    },
+    {
+      "claim": "Erd-Tools (Nordgaren, the canonical Elden Ring trainer/practice tool) defines PlayerIns.TargetHandle at offset 0x6B0 and PlayerIns.TargetArea at 0x6B4 — NOT 0x6A0 as parry-tell-probe currently uses. The handle at 0x6B0 is a direct ChrIns handle (FromSoft handle pattern), read as int64 with no further dereference required. The 0x10-byte (16-byte) shift between the probe's 0x6A0 and Erd-Tools' 0x6B0 perfectly explains why the probe reads a pointer-shaped value (0x7FF3073CBB60) instead of a handle — it is reading 0x10 bytes too early into a field that holds an unrelated pointer (likely a sub-system pointer in the player struct), and the actual lock-on handle field starts 16 bytes later.",
+      "evidence": "Nordgaren/Erd-Tools/src/Erd-Tools/Hook/Offsets.cs lines 547-548 explicitly declare TargetHandle = 0x6B0 and TargetArea = 0x6B4 in the PlayerIns offset enum. The accessor in ErdHook.cs reads it as a direct int64 handle (no double-deref): `public long CurrentTargetHandle => PlayerIns?.ReadInt64((int)Offsets.PlayerIns.TargetHandle) ?? 0;`. The file's most recent commit is 2026-03-14 (a2757f93), well within the ER 2.6.x patch window, and this offset is actively used by Erd-Tools' GetTarget()/CurrentTargetHandle logic to drive its 'last targeted enemy' UI feature. Probe source confirms: probe.cpp:170 defines `CHR_INS_TARGET_HANDLE = 0x6A0` — exactly 0x10 short of Erd-Tools' value.",
+      "quote": "TargetHandle = 0x6B0,\\n            TargetArea = 0x6B4,\\n            Instance = 0x10EF8,\\n            Data = 0x0 * 10,\\n            ChrData = 0x580,\\n            Name = 0x9C",
+      "source_url": "https://raw.githubusercontent.com/Nordgaren/Erd-Tools/main/src/Erd-Tools/Hook/Offsets.cs",
+      "source_date": "2026-03-14",
+      "tier": "primary",
+      "credibility_note": "Erd-Tools is the most widely-used Elden Ring trainer/practice tool, maintained by Nordgaren who is a top-tier ER reverse engineer. The TargetHandle/TargetArea offsets are exercised constantly by the trainer's working 'Get Target' feature, and the file was updated 2026-03-14 — patch alignment with ER 2.6.x is high. This is a primary RE source.",
+      "answers_offset": "lock_on",
+      "hypothesis": "A"
+    },
+    {
+      "claim": "Hypothesis A confirmed with correction: 0x6A0 is NOT a pointer needing further deref — it is simply the WRONG offset. The correct field is at PlayerIns+0x6B0 (int64 ChrIns handle) and PlayerIns+0x6B4 (int32 area). No indirection struct (LockOnState*/TargetSelector*/LockOnSystem*) is involved in Erd-Tools' path; the field is read flat as a 64-bit handle on PlayerIns directly.",
+      "evidence": "Erd-Tools reads at PlayerIns+0x6B0 with a single ReadInt64 call (no chase). When the handle is -1 it's treated as 'no target'. Erd-Tools then uses WorldChrMan + the handle to resolve back to the targeted ChrIns via the GetChrInsFromHandle AoB function — but the source of truth (the handle itself) is the flat int64 at +0x6B0.",
+      "quote": "public long CurrentTargetHandle => PlayerIns?.ReadInt64((int)Offsets.PlayerIns.TargetHandle) ?? 0;\\npublic int CurrentTargetArea => PlayerIns?.ReadInt32((int)Offsets.PlayerIns.TargetArea) ?? 0;\\n...\\nif (CurrentTargetHandle == -1 || CurrentTargetHandle == LastTargetEnemy?.Handle) return;",
+      "source_url": "https://raw.githubusercontent.com/Nordgaren/Erd-Tools/main/src/Erd-Tools/Hook/ErdHook.cs",
+      "source_date": "2026-03-14",
+      "tier": "primary",
+      "credibility_note": "Production code in an actively-shipping trainer. The lack of a second deref step is itself strong evidence that no LockOnState/TargetSelector indirection wrapper exists in this code path on ER's modern PlayerIns layout.",
+      "answers_offset": "lock_on",
+      "hypothesis": "A"
+    },
+    {
+      "claim": "The constant pointer-shaped value (0x7FF3073CBB60) the probe sees at 0x6A0 is consistent with reading into an adjacent pointer field that lives just before the lock-on handle in the PlayerIns struct. PlayerIns is known to host sub-module pointers in this region (e.g. ChrIns.AI struct base is at 0x580, ChrModuleBag at 0x190 per probe code). The fact that the value is constant across an entire session (does not change with lock-on toggle/switch) is consistent with it being a stable sub-system pointer rather than a lock-on target reference.",
+      "evidence": "Probe code itself documents adjacent pointer-bearing offsets nearby on PlayerIns: CHR_INS_AI_STRUCT_BASE at 0x580, CHR_INS_MODULE_BAG_PTR at 0x190, and the player position trio at 0x6C0/0x6C4/0x6C8 (just 0x10 past Erd-Tools' TargetHandle). The 0x6A0..0x6B0 range is therefore in a transition zone of the struct where 8-byte sub-pointers live; reading 0x10 early lands in one of them. Pattern 0x7FF3xxxxxxxx is a classic Windows user-mode heap pointer, not a FromSoft handle (which would match the documented 0x2001000014A00012-style pattern with high-byte 0x20).",
+      "quote": "constexpr int CHR_INS_AI_STRUCT_BASE     = 0x580;  // → ai bag → +0xC0 → struct\\n    constexpr int CHR_INS_TARGET_HANDLE      = 0x6A0;  // PlayerIns lock-on target\\n    // PlayerIns position (Tier 1 video correlation; v5f confirmed):\\n    constexpr int PLAYER_INS_POS_X           = 0x6C0;",
+      "source_url": "file:///home/joshua.blattner/claude/elden-ring/probe/probe.cpp",
+      "source_date": "2026-05-11",
+      "tier": "primary",
+      "credibility_note": "Probe code self-evidence + Erd-Tools cross-check. The 0x10 delta and the pointer-pattern shape of the value both point to 'reading the wrong offset' rather than 'reading a pointer that needs deref'. Combined credibility: high.",
+      "answers_offset": "lock_on",
+      "hypothesis": "A"
+    },
+    {
+      "claim": "Hypothesis B (CSFEManager direct lock-on slot) is NOT supported by available evidence. Erd-Tools — which actively reads boss-bar-adjacent state — does not use any CSFEManager / CSFD4 / FE manager pointer for the lock-on target. It reads PlayerIns.TargetHandle (+0x6B0) instead. The probe's existing CSFEManager scrape is for boss-bar HP arrays (a UI-side mirror), not lock-on; these are conceptually adjacent but architecturally separate in ER's runtime.",
+      "evidence": "Erd-Tools' Offsets.cs has zero CSFEManager / FE-bar entries for target lookup. The only CS* manager-class entry adjacent to handle resolution is `CSFD4VirtualMemoryFlag` (event flag system, unrelated to lock-on). All lock-on / current-target logic routes through PlayerIns.TargetHandle and WorldChrMan, never CSFEManager. libER (Dasaav-dsv) likewise has no `csfe`/`feman`/`bossbar` files in its include tree.",
+      "quote": "// (No CSFEManager-based target lookup exists in Erd-Tools; PlayerIns+0x6B0 is the canonical path. CSFD4 is event-flag state, not lock-on.)\\npublic enum CSFD4VirtualMemoryFlag\\n{\\n    NumFlagsInBlock = 0x1C,\\n    FlagHolderEntrySize = 0x20,\\n    ...",
+      "source_url": "https://raw.githubusercontent.com/Nordgaren/Erd-Tools/main/src/Erd-Tools/Hook/Offsets.cs",
+      "source_date": "2026-03-14",
+      "tier": "primary",
+      "credibility_note": "Negative evidence from a comprehensive RE source. Erd-Tools covers many CS managers (param repo, FD4 virtual memory flags, weather, etc.) but does NOT use any FE/boss-bar manager for the lock-on target — this is a strong signal that this path does not exist or is not the right one for ER 2.6.x.",
+      "answers_offset": "csfeman_lockon",
+      "hypothesis": "B"
+    },
+    {
+      "claim": "Hypothesis C (lock-on lives on a sibling sub-module of PlayerIns like PlayerCtrl/LockOnManager) is also NOT supported. Erd-Tools shows the lock-on handle is a flat int64 directly on PlayerIns, no sub-module bag indirection. ChrModuleBag (PlayerIns+0x190) hosts things like the TimeAct module, but lock-on is held directly in PlayerIns at +0x6B0/+0x6B4, alongside player position at +0x6C0.",
+      "evidence": "The 0x6B0 field is in the same flat region of PlayerIns as the player's own world position (PlayerIns+0x6C0). Both are 'live combat state' fields read directly with no deref, no module-bag walk. There is no PlayerCtrl/ChrCtrl pointer entry in Erd-Tools' PlayerIns or ChrIns enums.",
+      "quote": "public enum PlayerIns\\n{\\n    TargetHandle = 0x6B0,\\n    TargetArea = 0x6B4,\\n    Instance = 0x10EF8,\\n    Data = 0x0 * 10,\\n    ChrData = 0x580,\\n    Name = 0x9C\\n}",
+      "source_url": "https://raw.githubusercontent.com/Nordgaren/Erd-Tools/main/src/Erd-Tools/Hook/Offsets.cs",
+      "source_date": "2026-03-14",
+      "tier": "primary",
+      "credibility_note": "Same source as Finding 1, additional dimension. The struct layout (handle inline, no module bag detour) is the dispositive evidence against Hypothesis C.",
+      "answers_offset": "lock_on",
+      "hypothesis": "C"
+    }
+  ]
+}

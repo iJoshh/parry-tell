@@ -33,3 +33,4 @@ data/*.zip
 *.anibnd.dcx
 __pycache__/
 data/raw/chr/
+.gstack/
