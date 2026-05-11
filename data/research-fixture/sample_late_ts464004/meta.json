@@ -1,0 +1,28 @@
+{
+  "sample_ts_ms_rel": 464004,
+  "sample_frame": 5582,
+  "focused_chr_ins_abs": "0x7FF43AE834F0",
+  "enemy_anim_id_probe_reads": 0,
+  "enemy_anim_time_probe_reads": [
+    NaN,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "player_anim_id_probe_reads": 2000000,
+  "player_anim_time_probe_reads": [
+    2.830638312219238e-39,
+    0.09400823712348938,
+    0.10350121557712555,
+    1.3333333730697632
+  ],
+  "player_pos_probe_reads": [
+    35.78799819946289,
+    105.77066802978516,
+    111.94145965576172
+  ],
+  "player_chr_ins": "0x7FF42CF13780",
+  "enemy_handle": "0x2001000014A00012",
+  "enemy_field_at_0x080": 1117890019,
+  "note": "use this together with other samples to cross-check offset candidates \u2014 the offset must read DIFFERENT values across these samples if it tracks animation state"
+}

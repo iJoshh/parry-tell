@@ -1,0 +1,141 @@
+{
+  "capture_source": "qualification-20260511-133002.bin",
+  "sample_ts_ms_rel": 444433,
+  "sample_frame": 3652,
+  "mode": 2,
+  "wcm_ptr": "0x7FF425CF2050",
+  "module_base_eldenring": "0x7FF77AC00000",
+  "player": {
+    "chr_ins_abs": "0x7FF42CF13780",
+    "anim_id": 2019001,
+    "anim_time": [
+      2.8306369109207737e-39,
+      0.18014156818389893,
+      0.19671036303043365,
+      1.3333333730697632
+    ],
+    "pos_probe_reads": [
+      32.422386169433594,
+      106.59825897216797,
+      111.12327575683594
+    ],
+    "lock_on_target_handle": "0x7FF3073CBB60",
+    "boss_bar_handles": [
+      "0xFFFFFFFFFFFFFFFF",
+      "0xFFFFFFFFFFFFFFFF",
+      "0xFFFFFFFFFFFFFFFF"
+    ]
+  },
+  "focused_enemy": {
+    "chr_ins_abs": "0x7FF43AE834F0",
+    "handle": "0x2001000014A00012",
+    "field_at_0x038": 536936448,
+    "field_at_0x060": 43823010,
+    "field_at_0x064": 4382,
+    "field_at_0x068": 5,
+    "field_at_0x06C": 1088872966,
+    "field_at_0x080": 1117890019,
+    "field_at_0x1E8": 32010220,
+    "anim_id_probe_reads": 0,
+    "anim_time_probe_reads": [
+      NaN,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "in_lock_on": false,
+    "in_boss_bar": false,
+    "in_roster": true,
+    "is_focused": true,
+    "enemy_class": 0,
+    "region_count": 12,
+    "regions_by_id": [
+      {
+        "idx": 0,
+        "id": 0,
+        "name": "chr_ins_root",
+        "len": 2048,
+        "region_base": "0x7FF43AE834F0"
+      },
+      {
+        "idx": 1,
+        "id": 1,
+        "name": "module_bag",
+        "len": 512,
+        "region_base": "0x7FF42CEB1200"
+      },
+      {
+        "idx": 2,
+        "id": 2,
+        "name": "time_act_module",
+        "len": 8192,
+        "region_base": "0x7FF42D1230E0"
+      },
+      {
+        "idx": 3,
+        "id": 3,
+        "name": "time_act_focus",
+        "len": 32,
+        "region_base": "0x7FF42D1230E0"
+      },
+      {
+        "idx": 4,
+        "id": 4,
+        "name": "time_act_child",
+        "len": 256,
+        "region_base": "0x7FF77D634640"
+      },
+      {
+        "idx": 5,
+        "id": 4,
+        "name": "time_act_child",
+        "len": 256,
+        "region_base": "0x7FF43AE834F0"
+      },
+      {
+        "idx": 6,
+        "id": 4,
+        "name": "time_act_child",
+        "len": 256,
+        "region_base": "0x7FF36B240D50"
+      },
+      {
+        "idx": 7,
+        "id": 4,
+        "name": "time_act_child",
+        "len": 256,
+        "region_base": "0x7FF77D62C668"
+      },
+      {
+        "idx": 8,
+        "id": 4,
+        "name": "time_act_child",
+        "len": 256,
+        "region_base": "0x7FF43AD84020"
+      },
+      {
+        "idx": 9,
+        "id": 4,
+        "name": "time_act_child",
+        "len": 256,
+        "region_base": "0x7FF43AE7FCB0"
+      },
+      {
+        "idx": 10,
+        "id": 4,
+        "name": "time_act_child",
+        "len": 256,
+        "region_base": "0x7FF77D634640"
+      },
+      {
+        "idx": 11,
+        "id": 4,
+        "name": "time_act_child",
+        "len": 256,
+        "region_base": "0x7FF43AE800A0"
+      }
+    ]
+  },
+  "inferred_cid_from_f060": 4382,
+  "this_enemy_is": "Godrick Knight at Stormveil Gatefront (c4380 family, instance 4382)"
+}
