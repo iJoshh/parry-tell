@@ -634,10 +634,25 @@ def main(argv: list[str]) -> int:
     result = run_qualification(base, database_path=db, tolerance_ms=tolerance_ms)
     print(format_report(result, base))
 
-    # Also write JSON report for downstream consumers.
+    # Also write JSON report for downstream consumers. The capture path
+    # is often on a read-only SMB share (/mnt/station-projects is RO from
+    # this VM), so fall back to <repo>/data/qualification-reports/ when
+    # the .bin dir is unwritable.
     out = base + ".qualification.json"
-    with open(out, "w") as fh:
-        json.dump(result, fh, indent=2, default=str)
+    try:
+        with open(out, "w") as fh:
+            json.dump(result, fh, indent=2, default=str)
+    except OSError as e:
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        fallback_dir = os.path.join(repo_root, "data", "qualification-reports")
+        os.makedirs(fallback_dir, exist_ok=True)
+        fallback_out = os.path.join(fallback_dir, os.path.basename(out))
+        with open(fallback_out, "w") as fh:
+            json.dump(result, fh, indent=2, default=str)
+        print(f"(write to {out} failed: {e}; wrote to {fallback_out} instead)",
+              file=sys.stderr)
+        out = fallback_out
+    print(f"\nReport JSON: {out}")
 
     return 0 if result["verdict"] == "PASSED" else 1
 

@@ -866,11 +866,18 @@ static bool ValidateRosterInit() {
     g_roster = RosterValidation{};
     if (!g_refs.ready || !g_refs.wcmPtrAddr) return false;
 
+    // v6.1: De-spam — emit roster_fail messages every 5th attempt instead of every one.
+    static int s_wcmRetryCount = 0;
+
     uintptr_t wcm = 0;
     if (!SafeRead<uintptr_t>(g_refs.wcmPtrAddr, &wcm) || !LooksLikeUserPtr(wcm)) {
-        BootLog("roster_fail: WCM not yet readable (game not loaded?)");
+        if (s_wcmRetryCount == 0 || (s_wcmRetryCount % 5) == 0) {
+            BootLog("roster_fail: WCM not yet readable (attempt #%d)", s_wcmRetryCount);
+        }
+        s_wcmRetryCount++;
         return false;
     }
+    s_wcmRetryCount = 0;
 
     uintptr_t beginAddr = wcm + Off::WCM_ROSTER_BEGIN;
     uintptr_t endAddr   = wcm + Off::WCM_ROSTER_END;
@@ -2741,8 +2748,9 @@ static DWORD WINAPI WorkerMain(LPVOID) {
     }
 
     // (g) roster validation (NOT fail-closed)
+    // v6.1: extended grace from 15s to 60s (covers slow boot + save-select).
     bool rosterOk = false;
-    for (int i = 0; i < 30 && g_running.load(); ++i) {
+    for (int i = 0; i < 120 && g_running.load(); ++i) {
         if (ValidateRosterInit()) { rosterOk = true; break; }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
@@ -3021,6 +3029,28 @@ DWORD WINAPI F11Thread(LPVOID) {
         bool pressed = (s & 0x8000) != 0;
         if (pressed && !prev) {
             bool was = g_armed.load();
+            // v6.1: if user is about to ARM and roster is currently disabled,
+            // give WCM one more chance — the user may have just loaded a save.
+            if (!was && !g_roster.enabled) {
+                BootLog("F11: roster recheck attempt (was disabled, retrying)");
+                LogF("F11: roster recheck attempt");
+                for (int i = 0; i < 10 && g_running.load(); ++i) {
+                    if (ValidateRosterInit()) {
+                        BootLog("F11: roster ENABLED on retry");
+                        LogF("F11: roster ENABLED on retry");
+                        // Re-emit manifest so post-session tooling sees roster_enabled=1.
+                        // Version components are pulled from the live g_refs struct,
+                        // so the four zeros here are placeholders that get overwritten.
+                        WriteSessionManifest(0, 0, 0, 0, g_roster, g_sessionStartMs);
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+                if (!g_roster.enabled) {
+                    BootLog("F11: roster recheck FAILED, staying in fallback");
+                    LogF("F11: roster recheck FAILED");
+                }
+            }
             g_armed.store(!was);
             if (!was) {
                 BootLog("F11: armed");

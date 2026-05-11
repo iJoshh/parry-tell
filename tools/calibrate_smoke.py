@@ -346,14 +346,28 @@ def main(argv):
     report = format_report(samples, results)
     sys.stdout.write(report)
 
-    # Also write to disk next to the .bin
+    # Also write to disk next to the .bin. The capture path is often on
+    # a read-only SMB share (/mnt/station-projects is RO from this VM),
+    # so fall back to <repo>/data/calibration-reports/ when the .bin dir
+    # is unwritable.
     out_path = base + ".calibration.txt"
     try:
         with open(out_path, "w") as f:
             f.write(report)
         print(f"\nWritten: {out_path}")
     except OSError as e:
-        print(f"\n(could not write {out_path}: {e})", file=sys.stderr)
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        fallback_dir = os.path.join(repo_root, "data", "calibration-reports")
+        try:
+            os.makedirs(fallback_dir, exist_ok=True)
+            fallback_out = os.path.join(fallback_dir, os.path.basename(out_path))
+            with open(fallback_out, "w") as f:
+                f.write(report)
+            print(f"\n(write to {out_path} failed: {e}; wrote to {fallback_out} instead)",
+                  file=sys.stderr)
+        except OSError as e2:
+            print(f"\n(could not write report anywhere: {e}; fallback also failed: {e2})",
+                  file=sys.stderr)
 
     # Exit code mirrors the verdict for scripting.
     if any(r.gate_pass() for r in results):
