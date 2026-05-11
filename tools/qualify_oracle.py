@@ -238,7 +238,18 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
     """Pick the best of the 4 enemy_anim_time_candidates per the spec gate:
         f32 finite + 0..600 + monotonic_segments >= 3 + max_segment_dur >= 0.3s
         + rewinds_on_anim_id_change.
+
+    Anim-transition lag tolerance: the probe samples at ~91 Hz and races the
+    game's animation state machine. When the game emits a new anim_id, the
+    anim_time field can take 1-2 samples (~22 ms) to catch up. The rewind
+    check therefore looks at the value ANIM_TRANSITION_LAG_SAMPLES samples
+    AFTER the transition, not on the transition sample itself. This was
+    discovered analyzing smoke-20260509-170547 — without this tolerance,
+    every transition's rewind check fails because val == prev_val at the
+    first post-transition sample.
     """
+    ANIM_TRANSITION_LAG_SAMPLES = 3  # check rewind 3 samples after transition
+
     # Per-candidate state
     @dataclass
     class _S:
@@ -251,6 +262,12 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
         prev_anim: int = 0
         seg_start: float = 0.0
         seg_n: int = 0
+        # Lag tolerance: when a transition is observed, record the prev_val
+        # (the old anim's final value) and the new anim's id, then check for
+        # rewind N samples later.
+        pending_rewind_check: bool = False
+        pending_rewind_old_val: float = 0.0
+        pending_rewind_countdown: int = 0
 
     state = [_S() for _ in range(4)]
 
@@ -271,14 +288,28 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
                     st.seg_start = val
                     st.seg_n = 1
                     continue
+                # If a pending rewind check is armed, decrement and evaluate
+                # when the countdown reaches zero. We compare the current
+                # value against the OLD anim's final value (captured at the
+                # transition). This is the lag-tolerant rewind detection.
+                if st.pending_rewind_check:
+                    st.pending_rewind_countdown -= 1
+                    if st.pending_rewind_countdown <= 0:
+                        if val < st.pending_rewind_old_val:
+                            st.rewinds = True
+                        st.pending_rewind_check = False
                 if e.anim_id != st.prev_anim:
                     if st.seg_n >= 3:
                         dur = st.prev_val - st.seg_start
                         if dur > st.max_dur:
                             st.max_dur = dur
                         st.seg_count += 1
-                    if val < st.prev_val:
-                        st.rewinds = True
+                    # Arm the lag-tolerant rewind check. Capture the old
+                    # anim's final value (prev_val); we'll compare the
+                    # candidate field N samples later.
+                    st.pending_rewind_check = True
+                    st.pending_rewind_old_val = st.prev_val
+                    st.pending_rewind_countdown = ANIM_TRANSITION_LAG_SAMPLES
                     st.seg_start = val
                     st.seg_n = 1
                     st.prev_val = val

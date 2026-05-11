@@ -48,6 +48,17 @@ def build_qualification_bin(path: str, char_db: dict) -> dict:
 
     # For each parry window in the spec, generate ~30 samples advancing
     # anim_time from 0 → window_end + 0.2s, then reset on next window.
+    #
+    # Models the anim-transition LAG observed in real probe captures: when
+    # the game emits a new anim_id, the anim_time field can take 1-2 samples
+    # (~22 ms at 91 Hz) to catch up to the new value. This mirrors the
+    # behavior seen in smoke-20260509-170547. The test fixture injects 2
+    # "lag samples" at the start of each new animation where the anim_id has
+    # already changed but the anim_time still carries the previous anim's
+    # final value. find_anim_time_field must tolerate this.
+    LAG_SAMPLES = 2
+    prev_anim_final_t = 0.0  # the last anim_time value of the previous anim
+    is_first_anim = True
     for w in pw:
         anim_time = 0.0
         # Use full encoding (matches what the runtime is expected to produce
@@ -56,7 +67,16 @@ def build_qualification_bin(path: str, char_db: dict) -> dict:
         anim_id = w.anim_id_full
         sample_step_s = 0.011    # 11 ms ≈ 90 Hz focused capture
         n_samples = int((w.window_end_s + 0.2) / sample_step_s) + 1
+        # Emit LAG_SAMPLES at the START of every new anim except the first one,
+        # where anim_id is the new value but anim_time is still the prev final.
+        lag_remaining = 0 if is_first_anim else LAG_SAMPLES
+        is_first_anim = False
         for _ in range(n_samples):
+            if lag_remaining > 0:
+                emitted_time = prev_anim_final_t
+                lag_remaining -= 1
+            else:
+                emitted_time = anim_time
             payload = make_synthetic_sample(
                 frame=frame, ts_ms_rel=ts_ms_rel, mode=2, truncated=False,
                 enemies=[
@@ -71,7 +91,7 @@ def build_qualification_bin(path: str, char_db: dict) -> dict:
                         "f080": 0x66666666,
                         "f1E8": 0x55555555,
                         "anim_id": anim_id,
-                        "anim_time": (0.0, anim_time, 0.0, -1.0),  # TimeAct+0x24 is the live one
+                        "anim_time": (0.0, emitted_time, 0.0, -1.0),  # TimeAct+0x24 is the live one
                         "in_lock_on": True,
                         "in_boss_bar": False,
                         "in_roster": True,
@@ -86,7 +106,11 @@ def build_qualification_bin(path: str, char_db: dict) -> dict:
             samples.append(payload)
             frame += 1
             ts_ms_rel += 11
-            anim_time += sample_step_s
+            if lag_remaining == 0:
+                # only advance the "real" anim_time once we're past the lag
+                anim_time += sample_step_s
+        # Remember the final emitted time of this anim for the next anim's lag.
+        prev_anim_final_t = emitted_time
 
     # Write .bin
     with open(path, "wb") as fh:
