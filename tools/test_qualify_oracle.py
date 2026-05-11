@@ -50,13 +50,14 @@ def build_qualification_bin(path: str, char_db: dict) -> dict:
     # anim_time from 0 → window_end + 0.2s, then reset on next window.
     #
     # Models the anim-transition LAG observed in real probe captures: when
-    # the game emits a new anim_id, the anim_time field can take 1-2 samples
-    # (~22 ms at 91 Hz) to catch up to the new value. This mirrors the
-    # behavior seen in smoke-20260509-170547. The test fixture injects 2
-    # "lag samples" at the start of each new animation where the anim_id has
-    # already changed but the anim_time still carries the previous anim's
-    # final value. find_anim_time_field must tolerate this.
-    LAG_SAMPLES = 2
+    # the game emits a new anim_id, the anim_time field can take 1-10 samples
+    # (median ~4, P90 ~9 on smoke-20260509-170547 at 91 Hz) to catch up to
+    # the new value. The test fixture injects LAG_SAMPLES "lag samples" at
+    # the start of each new animation where the anim_id has already changed
+    # but the anim_time still carries the previous anim's final value.
+    # find_anim_time_field must tolerate this. Set to the P90 observed in
+    # real data so the regression gate is meaningfully strict.
+    LAG_SAMPLES = 9
     prev_anim_final_t = 0.0  # the last anim_time value of the previous anim
     is_first_anim = True
     for w in pw:

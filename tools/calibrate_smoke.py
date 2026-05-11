@@ -56,7 +56,14 @@ import probe_bin
 CANDIDATE_OFFSETS = [0x20, 0x24, 0x28, 0x2C]
 
 # Tolerance: number of post-transition samples to ignore for rewind detection.
-ANIM_TRANSITION_TOLERANCE_SAMPLES = 2
+#
+# Measured against the 2026-05-09 smoke capture (9,867 samples, 38 anim
+# transitions): observed lag from anim_id change to first value update on
+# +0x24/+0x28 ranges from 1 to 10 samples (~11ms to ~110ms at 91 Hz).
+# Median 4 samples, P90 9 samples. A 12-sample window covers the full
+# observed distribution with margin; raise it again if a future capture
+# blows past this.
+ANIM_TRANSITION_TOLERANCE_SAMPLES = 12
 
 # Floating-point tolerance for "value did not decrease."
 FP_TOLERANCE = 0.001
@@ -117,8 +124,13 @@ def analyze_candidate(samples, candidate_idx: int) -> CandidateResult:
     cur_anim_id: Optional[int] = None
     cur_seg_start: Optional[float] = None
     cur_seg_max: Optional[float] = None
+    # cur_anim_max: peak value seen across the ENTIRE current anim, not just
+    # the current monotonic segment. The rewind check compares against this
+    # so that within-anim micro-rewinds (e.g. looping anims, multi-segment
+    # tracks) do not corrupt the comparison baseline.
+    cur_anim_max: Optional[float] = None
     samples_since_id_change: int = 0
-    pending_id_change: Optional[tuple] = None  # (old_id, new_id, value_before, ts_ms)
+    pending_id_change: Optional[tuple] = None  # (old_id, new_id, prev_anim_max, ts_ms)
 
     for s in samples:
         val = s.player_anim_time[candidate_idx]
@@ -141,6 +153,7 @@ def analyze_candidate(samples, candidate_idx: int) -> CandidateResult:
             cur_anim_id = anim_id
             cur_seg_start = val
             cur_seg_max = val
+            cur_anim_max = val
             samples_since_id_change = 999  # past tolerance from the start
             continue
 
@@ -154,20 +167,28 @@ def analyze_candidate(samples, candidate_idx: int) -> CandidateResult:
                     r.max_segment_dur = seg_dur
             # Start tracking the new anim's first sample.
             r.transitions_seen += 1
-            pending_id_change = (cur_anim_id, anim_id, cur_seg_max, ts)
+            pending_id_change = (cur_anim_id, anim_id, cur_anim_max, ts)
             cur_anim_id = anim_id
             cur_seg_start = val
             cur_seg_max = val
+            cur_anim_max = val
             samples_since_id_change = 0
             continue
 
         # Same anim_id as previous sample.
         samples_since_id_change += 1
 
+        # Track whole-anim peak (never resets within an anim).
+        if cur_anim_max is None or val > cur_anim_max:
+            cur_anim_max = val
+
         # Rewind check: only evaluate AFTER the tolerance window. The reason
         # is the probe samples at ~90Hz and the game's anim transition takes
-        # 1-2 frames to propagate into the time field, so the first samples
-        # after an id change can still carry the old anim's value.
+        # several frames (median ~4, P90 ~9 on the 2026-05-09 capture) to
+        # propagate into the time field, so the first samples after an id
+        # change can still carry the old anim's value. Compare against the
+        # PREVIOUS anim's whole-anim peak so within-anim micro-rewinds don't
+        # corrupt the baseline.
         if (
             pending_id_change is not None
             and samples_since_id_change >= ANIM_TRANSITION_TOLERANCE_SAMPLES

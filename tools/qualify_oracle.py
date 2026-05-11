@@ -241,14 +241,23 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
 
     Anim-transition lag tolerance: the probe samples at ~91 Hz and races the
     game's animation state machine. When the game emits a new anim_id, the
-    anim_time field can take 1-2 samples (~22 ms) to catch up. The rewind
-    check therefore looks at the value ANIM_TRANSITION_LAG_SAMPLES samples
-    AFTER the transition, not on the transition sample itself. This was
-    discovered analyzing smoke-20260509-170547 — without this tolerance,
-    every transition's rewind check fails because val == prev_val at the
-    first post-transition sample.
+    anim_time field takes several samples to catch up — measured against the
+    2026-05-09 smoke capture (player-side, 38 transitions): lag ranges from
+    1 to 10 samples (median 4, P90 9). The rewind check therefore looks at
+    the value ANIM_TRANSITION_LAG_SAMPLES samples AFTER the transition,
+    not on the transition sample itself. A 12-sample window covers the full
+    observed distribution with margin.
+
+    Whole-anim peak baseline: the rewind comparison uses prev_anim_max
+    (peak value across the entire prior anim) rather than prev_val (last
+    sample's value). Looping anims and multi-segment tracks produce
+    within-anim micro-rewinds; if the rewind check compared against the
+    last value seen in the prior anim, those micro-rewinds would corrupt
+    the baseline and produce false-positive non-rewind failures at
+    transition. Discovered analyzing smoke-20260509-170547 on +0x24:
+    2/38 transitions were false-positives until this fix.
     """
-    ANIM_TRANSITION_LAG_SAMPLES = 3  # check rewind 3 samples after transition
+    ANIM_TRANSITION_LAG_SAMPLES = 12  # check rewind 12 samples after transition
 
     # Per-candidate state
     @dataclass
@@ -262,11 +271,14 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
         prev_anim: int = 0
         seg_start: float = 0.0
         seg_n: int = 0
-        # Lag tolerance: when a transition is observed, record the prev_val
-        # (the old anim's final value) and the new anim's id, then check for
-        # rewind N samples later.
+        # Peak value across the entire current anim — does NOT reset on
+        # within-anim micro-rewinds. Used as the baseline for the
+        # transition rewind check.
+        cur_anim_max: float = 0.0
+        # Lag tolerance: when a transition is observed, record the prior
+        # anim's whole-anim peak, then check for rewind N samples later.
         pending_rewind_check: bool = False
-        pending_rewind_old_val: float = 0.0
+        pending_rewind_old_max: float = 0.0
         pending_rewind_countdown: int = 0
 
     state = [_S() for _ in range(4)]
@@ -287,15 +299,16 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
                     st.prev_anim = e.anim_id
                     st.seg_start = val
                     st.seg_n = 1
+                    st.cur_anim_max = val
                     continue
                 # If a pending rewind check is armed, decrement and evaluate
                 # when the countdown reaches zero. We compare the current
-                # value against the OLD anim's final value (captured at the
-                # transition). This is the lag-tolerant rewind detection.
+                # value against the OLD anim's whole-anim peak (captured at
+                # the transition). This is the lag-tolerant rewind detection.
                 if st.pending_rewind_check:
                     st.pending_rewind_countdown -= 1
                     if st.pending_rewind_countdown <= 0:
-                        if val < st.pending_rewind_old_val:
+                        if val < st.pending_rewind_old_max:
                             st.rewinds = True
                         st.pending_rewind_check = False
                 if e.anim_id != st.prev_anim:
@@ -305,17 +318,20 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
                             st.max_dur = dur
                         st.seg_count += 1
                     # Arm the lag-tolerant rewind check. Capture the old
-                    # anim's final value (prev_val); we'll compare the
-                    # candidate field N samples later.
+                    # anim's whole-anim peak; we'll compare the candidate
+                    # field N samples later.
                     st.pending_rewind_check = True
-                    st.pending_rewind_old_val = st.prev_val
+                    st.pending_rewind_old_max = st.cur_anim_max
                     st.pending_rewind_countdown = ANIM_TRANSITION_LAG_SAMPLES
                     st.seg_start = val
                     st.seg_n = 1
                     st.prev_val = val
                     st.prev_anim = e.anim_id
+                    st.cur_anim_max = val
                     continue
                 # Same anim_id.
+                if val > st.cur_anim_max:
+                    st.cur_anim_max = val
                 if val + 1e-6 >= st.prev_val:
                     st.seg_n += 1
                     st.prev_val = val

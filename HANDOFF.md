@@ -1,8 +1,34 @@
 # HANDOFF — parry-tell (elden-ring)
 
-**Last update:** 2026-05-10 19:30 (America/Chicago) — pre-session-2 prep
-**Branch:** main — staged for "power through" session tomorrow
+**Last update:** 2026-05-11 — session-day analyzer fix
+**Branch:** main — ready to play
 **Probe v6 DLL:** live in `Game\mods\` (smoke INI loaded)
+
+## Session-day note (2026-05-11)
+
+Pre-session validation against the existing 9,867-sample 2026-05-09 capture
+caught two analyzer bugs that would have masked a successful smoke today:
+
+1. `ANIM_TRANSITION_TOLERANCE_SAMPLES` was 2 in `calibrate_smoke.py` and
+   3 in `qualify_oracle.py` (`ANIM_TRANSITION_LAG_SAMPLES`). Real data
+   shows lag distribution 1-10 samples (median 4, P90 9). Bumped both to
+   12, with a comment block explaining the measured distribution.
+
+2. Rewind detector compared the new-anim value against `cur_seg_max` /
+   `prev_val` (the local segment peak or last-sample value), which gets
+   corrupted by within-anim micro-rewinds in looping anims. Both analyzers
+   now track `cur_anim_max` (the actual peak across the entire prior anim)
+   and use that as the comparison baseline. This eliminated the last two
+   false-positive failures on +0x24 in the real data.
+
+After the fix: pre-session run against `smoke-20260509-170547` produces
+**PASS** with TimeAct +0x24 and +0x28 as winners (109 monotonic segments,
+5.87s max segment, 38/38 anim transitions show rewind), exactly matching
+the v6 spec prediction. +0x20 and +0x2C correctly FAIL.
+
+Test fixtures strictened: `test_qualify_oracle.py` now uses LAG_SAMPLES=9
+(real P90) instead of 2. All three regression tests (probe_bin,
+calibrate_smoke, qualify_oracle) PASS.
 
 ---
 
