@@ -6,7 +6,29 @@
 
 ## Session-day note (2026-05-11)
 
-Pre-session validation against the existing 9,867-sample 2026-05-09 capture
+### SSH auth changed: key → password
+
+Per Josh's request, station SSH switched from key auth to password auth so
+SMB and SSH share a single credential surface. Changes:
+
+- Local `~/.ssh/station_key` + `station_key.pub` deleted from this VM.
+- Station sshd_config: `PasswordAuthentication yes` (line 51), service
+  restarted. Done by Josh in an admin PowerShell — the `claude` account
+  is non-admin so I can't touch sshd config from this side.
+- New helper `tools/station-ssh.sh` provides `station_ssh` / `station_scp`
+  / `station_scp_recursive`. All reads the password from
+  `/etc/ssh-credentials-station` (root:600) via `sudo -n cat`. Endpoint
+  enforcement (claude@station only), option-injection guard (no caller-
+  supplied dash args), pinned host key (StrictHostKeyChecking=yes).
+- `tools/rebuild-and-stage.sh` and `probe/v6.1/apply-and-build.sh` both
+  updated to source the helper.
+- Local-side cleanup still owed: Josh should remove the line ending in
+  `claude@codeserver-vm-to-station` from `C:\Users\claude\.ssh\authorized_keys`
+  on station. That kills the now-orphan key-auth path entirely.
+
+### Analyzer fix
+
+Pre-session validation against the existing 9,867-sample 2026-05-09 capture (continued):
 caught two analyzer bugs that would have masked a successful smoke today:
 
 1. `ANIM_TRANSITION_TOLERANCE_SAMPLES` was 2 in `calibrate_smoke.py` and

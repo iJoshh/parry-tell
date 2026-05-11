@@ -7,6 +7,11 @@
 #   - SMB mounts are LIVE (we verify mountpoints, not just dir presence)
 #   - Game is CLOSED (DLL is locked while ER is running)
 #
+# Authentication: uses tools/station-ssh.sh which authenticates with the
+# claude@station password from /etc/ssh-credentials-station (root:600,
+# accessed via sudo NOPASSWD). The key-based auth path was retired
+# 2026-05-11 — see tools/station-ssh.sh header for rationale.
+#
 # Rollback model: any failure restores BOTH local probe.cpp AND station
 # probe.cpp AND (if it was overwritten) the v6.0 DLL. The script tracks
 # each mutation independently so partial failures restore correctly.
@@ -14,7 +19,6 @@
 set -uo pipefail
 
 REPO=/home/joshua.blattner/claude/elden-ring
-SSH_KEY="$HOME/.ssh/station_key"
 DLL_SRC=/mnt/station-projects/elden-ring/probe/bin/Release/parry-tell-probe.dll
 DLL_DST=/mnt/station-mods/parry-tell-probe.dll
 DLL_BACKUP=/mnt/station-mods/parry-tell-probe.dll.v6.0-backup
@@ -22,15 +26,12 @@ STATION_CPP_REMOTE='C:/Projects/elden-ring/probe/probe.cpp'
 STATION_CPP_BACKUP='C:/Projects/elden-ring/probe/probe.cpp.v6.0-backup'
 
 # --- Preflight ---
-# Verify SSH key + mounts BEFORE any state mutation.
-if [ ! -r "$SSH_KEY" ]; then
-    echo "ERROR: SSH key not readable at $SSH_KEY"
-    exit 1
-fi
 if ! cd "$REPO"; then
     echo "ERROR: cannot cd to $REPO"
     exit 1
 fi
+# shellcheck source=../../tools/station-ssh.sh
+. "$REPO/tools/station-ssh.sh"
 if ! mountpoint -q /mnt/station-mods; then
     echo "ERROR: /mnt/station-mods is not a mountpoint (SMB share may be down)"
     exit 1
@@ -42,7 +43,12 @@ fi
 
 # --- Single-instance lock ---
 # Prevents two concurrent invocations from racing on the station backup.
-LOCKFILE=/tmp/parry-tell-v6.1-deploy.lock
+# Use a user-owned dir (XDG_RUNTIME_DIR is per-user 700 on systemd-login
+# systems) rather than a world-writable /tmp path that another local user
+# could pre-create or truncate.
+LOCKDIR="${XDG_RUNTIME_DIR:-$HOME/.cache}/parry-tell"
+mkdir -p "$LOCKDIR" && chmod 700 "$LOCKDIR"
+LOCKFILE="$LOCKDIR/v6.1-deploy.lock"
 exec 9>"$LOCKFILE"
 if ! flock -n 9; then
     echo "ERROR: another deploy is in progress (lock at $LOCKFILE)"
@@ -55,7 +61,9 @@ STATION_CPP_BACKUP_CREATED=0
 DLL_BACKUP_CREATED=0
 
 cleanup_on_fail() {
-    local exit_code=$?
+    # First positional arg, if given, overrides $? (used by signal traps
+    # to pass through 128+signum instead of the last quiet command's exit).
+    local exit_code=${1:-$?}
     echo ""
     echo "=== FAILURE (exit $exit_code) — rolling back ==="
 
@@ -71,8 +79,7 @@ cleanup_on_fail() {
 
     if [ "$STATION_CPP_BACKUP_CREATED" = "1" ]; then
         echo "  restoring station probe.cpp from backup"
-        if ssh -i "$SSH_KEY" -o ConnectTimeout=5 claude@station \
-            "if exist $STATION_CPP_BACKUP move /Y $STATION_CPP_BACKUP $STATION_CPP_REMOTE" 2>/dev/null; then
+        if station_ssh "if exist $STATION_CPP_BACKUP move /Y $STATION_CPP_BACKUP $STATION_CPP_REMOTE" 2>/dev/null; then
             echo "  station revert ok"
         else
             echo "  WARNING: station revert failed (backup at $STATION_CPP_BACKUP — manual restore needed)"
@@ -88,15 +95,27 @@ cleanup_on_fail() {
 }
 # Cleanup fires on ERR (set -e), AND on Ctrl-C / SIGTERM / SIGHUP so a user
 # interruption doesn't leave a half-deployed state. The guard prevents double
-# cleanup if both an error AND a signal fire.
+# cleanup if both an error AND a signal fire. Signal traps pass through an
+# explicit exit code (128+signum convention) so callers can tell that the
+# script was interrupted, not that the prior quiet command succeeded.
 CLEANUP_DONE=0
-cleanup_guard() {
+cleanup_guard_err() {
     if [ "$CLEANUP_DONE" = "0" ]; then
         CLEANUP_DONE=1
         cleanup_on_fail
     fi
 }
-trap cleanup_guard ERR INT TERM HUP
+cleanup_guard_signal() {
+    local sig_exit=$1
+    if [ "$CLEANUP_DONE" = "0" ]; then
+        CLEANUP_DONE=1
+        cleanup_on_fail "$sig_exit"
+    fi
+}
+trap 'cleanup_guard_err'        ERR
+trap 'cleanup_guard_signal 130' INT
+trap 'cleanup_guard_signal 143' TERM
+trap 'cleanup_guard_signal 129' HUP
 
 echo "=== Step 1: dry-run patch application ==="
 if ! git apply --check probe/v6.1/probe-v6.1.patch; then
@@ -115,7 +134,7 @@ echo "  - 60s retry loop:            $(grep -c "i < 120" probe/probe.cpp)"
 echo "  - WCM retry counter:         $(grep -c "s_wcmRetryCount" probe/probe.cpp)"
 echo "  - F11 roster recheck:        $(grep -c "roster recheck attempt" probe/probe.cpp)"
 
-if ! ssh -i "$SSH_KEY" -o ConnectTimeout=5 claude@station 'echo SSH_OK' >/dev/null 2>&1; then
+if ! station_ssh 'echo SSH_OK' >/dev/null 2>&1; then
     echo "ERROR: SSH to station unreachable. Has Josh started the SSH service?"
     false
 fi
@@ -123,10 +142,17 @@ echo "  SSH to station: ok"
 
 echo "=== Step 3: backup + copy probe.cpp to station via SCP ==="
 # Refuse to clobber an existing station backup (would lose v6.0 rollback).
-# Capture SSH output + exit status separately so a transient SSH failure
-# is not silently treated as "backup does not exist."
-SSH_CHECK_OUT=$(ssh -i "$SSH_KEY" claude@station "if exist $STATION_CPP_BACKUP (echo BACKUP_EXISTS) else (echo BACKUP_ABSENT)" 2>&1)
-SSH_CHECK_RC=$?
+# Capture SSH output + exit status separately. The ERR trap would fire on
+# a nonzero station_ssh return inside a plain assignment, so we wrap the
+# call in an if/else to suppress ERR for the handled-failure path and
+# inspect rc/out explicitly.
+SSH_CHECK_OUT=""
+SSH_CHECK_RC=0
+if SSH_CHECK_OUT=$(station_ssh "if exist $STATION_CPP_BACKUP (echo BACKUP_EXISTS) else (echo BACKUP_ABSENT)" 2>&1); then
+    SSH_CHECK_RC=0
+else
+    SSH_CHECK_RC=$?
+fi
 if [ "$SSH_CHECK_RC" -ne 0 ]; then
     echo "ERROR: SSH backup-check failed (rc=$SSH_CHECK_RC):"
     echo "$SSH_CHECK_OUT"
@@ -144,14 +170,14 @@ if ! echo "$SSH_CHECK_OUT" | grep -q BACKUP_ABSENT; then
 fi
 # Create the station backup BEFORE scp so a partial-scp failure can still
 # restore via the trap.
-ssh -i "$SSH_KEY" claude@station "copy /Y $STATION_CPP_REMOTE $STATION_CPP_BACKUP" >/dev/null
+station_ssh "copy /Y $STATION_CPP_REMOTE $STATION_CPP_BACKUP" >/dev/null
 STATION_CPP_BACKUP_CREATED=1
 echo "  station backup created at $STATION_CPP_BACKUP"
-scp -i "$SSH_KEY" probe/probe.cpp "claude@station:$STATION_CPP_REMOTE"
+station_scp probe/probe.cpp "claude@station:$STATION_CPP_REMOTE"
 echo "  SCP ok"
 
 echo "=== Step 4: build via MSBuild ==="
-if ! ssh -i "$SSH_KEY" claude@station \
+if ! station_ssh \
     '"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" "C:\Projects\elden-ring\probe\probe.vcxproj" /p:Configuration=Release /p:Platform=x64 /t:Rebuild /v:minimal'; then
     echo "ERROR: MSBuild failed (see build output above)"
     false
@@ -184,9 +210,12 @@ ls -l "$DLL_DST"
 # Success — clean up the station-side .cpp backup (local-side rollback via git
 # is sufficient from here on).
 echo "  removing station-side probe.cpp.v6.0-backup (success)"
-ssh -i "$SSH_KEY" claude@station "del $STATION_CPP_BACKUP" >/dev/null 2>&1 || true
+station_ssh "del $STATION_CPP_BACKUP" >/dev/null 2>&1 || true
 
-trap - ERR INT TERM HUP
+trap - ERR
+trap - INT
+trap - TERM
+trap - HUP
 echo ""
 echo "=== DONE — v6.1 is live ==="
 echo "  - probe/probe.cpp is patched (commit when ready)"
