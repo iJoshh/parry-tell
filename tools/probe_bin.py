@@ -130,6 +130,13 @@ class EnemyRecord:
     focus_reason: int
     region_count: int
     regions: list[RegionRecord] = field(default_factory=list)
+    # v6.2 instrumentation fields (schema v2 only; 0/sentinel on v1 captures):
+    anim_id_path_b: int = 0
+    read_idx: int = 0xFFFFFFFF
+    anim_id_path_c: int = 0
+    action_request_abs: int = 0
+    phys_module_abs: int = 0
+    world_pos_phys: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     @property
     def class_name(self) -> str:
@@ -156,6 +163,12 @@ class Sample:
     enemy_record_count: int
     adaptive_step: int
     enemies: list[EnemyRecord] = field(default_factory=list)
+    # v6.2 Tier 1 player instrumentation fields (schema v2 only):
+    player_chr_ins_vtable: int = 0
+    player_pos_phys: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    player_phys_module_abs: int = 0
+    player_lock_on_target_handle_new: int = 0xFFFFFFFFFFFFFFFF
+    player_lock_on_target_area_new: int = 0xFFFFFFFF
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +252,19 @@ def _parse_sample(payload: bytes) -> Sample:
     player_anim_time = (cur.f32(), cur.f32(), cur.f32(), cur.f32())
     player_pos = (cur.f32(), cur.f32(), cur.f32())
     player_lock = cur.u64()
+    # v6.2 Tier 1 player instrumentation block (48 bytes, schema v2+):
+    player_chr_ins_vtable = 0
+    player_pos_phys = (0.0, 0.0, 0.0)
+    player_phys_module_abs = 0
+    player_lock_new = 0xFFFFFFFFFFFFFFFF
+    player_lock_area_new = 0xFFFFFFFF
+    if schema_version >= 2:
+        player_chr_ins_vtable = cur.u64()
+        player_pos_phys = (cur.f32(), cur.f32(), cur.f32())
+        player_phys_module_abs = cur.u64()
+        player_lock_new = cur.u64()
+        player_lock_area_new = cur.u32()
+        cur.u64()  # 8 bytes reserved (probe writes 0)
     boss = (cur.u64(), cur.u64(), cur.u64())
     focused = cur.u64()
     focus_reason = cur.u8()
@@ -264,6 +290,11 @@ def _parse_sample(payload: bytes) -> Sample:
         focus_reason=focus_reason,
         enemy_record_count=enemy_count,
         adaptive_step=adaptive_step,
+        player_chr_ins_vtable=player_chr_ins_vtable,
+        player_pos_phys=player_pos_phys,
+        player_phys_module_abs=player_phys_module_abs,
+        player_lock_on_target_handle_new=player_lock_new,
+        player_lock_on_target_area_new=player_lock_area_new,
     )
 
     # 2026-05-11: the probe (v6.0 and v6.1) has a count-vs-payload mismatch
@@ -278,7 +309,7 @@ def _parse_sample(payload: bytes) -> Sample:
         if cur.pos >= len(cur.buf):
             break
         try:
-            sample.enemies.append(_parse_enemy(cur))
+            sample.enemies.append(_parse_enemy(cur, schema_version))
         except ParseError:
             # Partial enemy record (probe truncated mid-write). Stop here;
             # caller can inspect sample.enemy_record_count vs len(enemies) to
@@ -287,7 +318,7 @@ def _parse_sample(payload: bytes) -> Sample:
     return sample
 
 
-def _parse_enemy(cur: _Cursor) -> EnemyRecord:
+def _parse_enemy(cur: _Cursor, schema_version: int = 1) -> EnemyRecord:
     chr_ins = cur.u64()
     handle = cur.u64()
     f038 = cur.u32()
@@ -307,7 +338,26 @@ def _parse_enemy(cur: _Cursor) -> EnemyRecord:
     foc_reason = cur.u8()
     reg_count = cur.u8()
     cur.u8()  # reserved
-    cur.take(24, "enemy header pad")  # padding to ENEMY_HEADER_BYTES = 96
+    # v6.2 instrumentation block (44 bytes, schema v2 only; +20 pad below = 64 → 136-byte header):
+    anim_id_path_b = 0
+    read_idx = 0xFFFFFFFF
+    anim_id_path_c = 0
+    action_request_abs = 0
+    phys_module_abs = 0
+    world_pos_phys = (0.0, 0.0, 0.0)
+    if schema_version >= 2:
+        anim_id_path_b = cur.u32()
+        read_idx = cur.u32()
+        anim_id_path_c = cur.u32()
+        cur.u32()  # reserved (align to 8)
+        action_request_abs = cur.u64()
+        phys_module_abs = cur.u64()
+        world_pos_phys = (cur.f32(), cur.f32(), cur.f32())
+        # pad: ENEMY_HEADER_BYTES (136) - 72 legacy - 44 v6.2 = 20 bytes
+        cur.take(20, "enemy header pad v2")
+    else:
+        # v1: pad to ENEMY_HEADER_BYTES = 96 -> 24 bytes
+        cur.take(24, "enemy header pad v1")
 
     enemy = EnemyRecord(
         chr_ins_abs=chr_ins,
@@ -328,6 +378,12 @@ def _parse_enemy(cur: _Cursor) -> EnemyRecord:
         is_focused=is_foc,
         focus_reason=foc_reason,
         region_count=reg_count,
+        anim_id_path_b=anim_id_path_b,
+        read_idx=read_idx,
+        anim_id_path_c=anim_id_path_c,
+        action_request_abs=action_request_abs,
+        phys_module_abs=phys_module_abs,
+        world_pos_phys=world_pos_phys,
     )
 
     for _ in range(reg_count):

@@ -1,0 +1,531 @@
+diff --git a/probe/probe.cpp b/probe/probe.cpp
+index 4c58628..3cf1723 100644
+--- a/probe/probe.cpp
++++ b/probe/probe.cpp
+@@ -72,8 +72,12 @@
+ // Constants
+ // ===========================================================================
+ 
+-#define PROBE_VERSION_STR "v6"
+-#define PROBE_SCHEMA_VERSION 1u
++#define PROBE_VERSION_STR "v6.2"
++// v6.2 (research 006 instrumentation): adds dual-read candidates for world
++// position, enemy anim_id, and player lock-on. Schema bumped to v2 to encode
++// the new per-row fields + 3 new region IDs. Analyzers MUST tolerate v2 to
++// read v6.2 captures.
++#define PROBE_SCHEMA_VERSION 2u
+ 
+ // Buffer pool sized per spec §buffer pool sizing (rev4):
+ // 256 × 256 KB = 64 MB; ~2.8s of stall tolerance at 90 Hz focused capture.
+@@ -96,14 +100,25 @@ static constexpr size_t REGION_CAP_AI_STRUCT        = 0x1000;  // 4096
+ static constexpr int    TIME_ACT_CHILD_SCAN_BYTES   = 0x800;   // first 2KB scanned for ptrs
+ static constexpr int    TIME_ACT_CHILD_MAX          = 8;       // cap children per entity
+ 
++// v6.2 instrumentation regions (schema v2): wider capture surface for the
++// three offset bugs identified in research/006-SYNTHESIS.md.
++static constexpr size_t REGION_CAP_PHYS_MODULE      = 0x200;   //  512 — ChrPhysicsModule body (world position leaf at +0x70)
++static constexpr size_t REGION_CAP_ACTION_REQUEST   = 0x200;   //  512 — ActionRequest module body (Erd-Tools enemy anim_id at +0x90)
++static constexpr size_t REGION_CAP_TIME_ACT_CHILD_BODY = 0x200; // 512 — first 3 TimeAct child bodies (wider than 0x100 child scan)
++static constexpr int    TIME_ACT_CHILD_BODY_MAX     = 3;       // cap deep-body children per entity (instrumentation)
++
+ // Region IDs (spec §Region-relative offsets rev3):
+ enum RegionId : uint8_t {
+-    REGION_CHR_INS_ROOT     = 0,
+-    REGION_MODULE_BAG       = 1,
+-    REGION_TIME_ACT_MODULE  = 2,
+-    REGION_TIME_ACT_FOCUS   = 3,
+-    REGION_TIME_ACT_CHILD   = 4,
+-    REGION_AI_STRUCT        = 5,
++    REGION_CHR_INS_ROOT          = 0,
++    REGION_MODULE_BAG            = 1,
++    REGION_TIME_ACT_MODULE       = 2,
++    REGION_TIME_ACT_FOCUS        = 3,
++    REGION_TIME_ACT_CHILD        = 4,
++    REGION_AI_STRUCT             = 5,
++    // v6.2 instrumentation (schema v2):
++    REGION_PHYS_MODULE           = 6,   // ChrPhysicsModule body (world pos leaf)
++    REGION_ACTION_REQUEST        = 7,   // ActionRequest module body (enemy anim_id alt path)
++    REGION_TIME_ACT_CHILD_BODY   = 8,   // first 3 TimeActChild bodies (deeper capture)
+ };
+ 
+ // Capture modes (spec §Modes):
+@@ -158,6 +173,7 @@ namespace Off {
+ 
+     // ChrIns generic offsets (capture as RAW field_at_0xNN; do NOT interpret):
+     constexpr int CHR_INS_HANDLE             = 0x008;
++    constexpr int CHR_INS_VTABLE_PTR         = 0x000;  // v6.2: vtable for PlayerIns* vs ChrIns* discriminator
+     constexpr int CHR_INS_FIELD_38           = 0x038;
+     constexpr int CHR_INS_FIELD_60           = 0x060;
+     constexpr int CHR_INS_FIELD_64           = 0x064;
+@@ -167,15 +183,21 @@ namespace Off {
+     constexpr int CHR_INS_FIELD_1E8          = 0x1E8;
+     constexpr int CHR_INS_MODULE_BAG_PTR     = 0x190;  // → ChrModuleBag*
+     constexpr int CHR_INS_AI_STRUCT_BASE     = 0x580;  // → ai bag → +0xC0 → struct
+-    constexpr int CHR_INS_TARGET_HANDLE      = 0x6A0;  // PlayerIns lock-on target
++    constexpr int CHR_INS_TARGET_HANDLE      = 0x6A0;  // legacy lock-on (probe v6.1.1)
++    // v6.2 lock-on candidates (research 006):
++    constexpr int PLAYER_INS_LOCK_HANDLE_NEW = 0x6B0;  // Erd-Tools / vswarte: locked_on_enemy FieldInsHandle
++    constexpr int PLAYER_INS_LOCK_AREA_NEW   = 0x6B4;  // Erd-Tools: TargetArea (4 bytes after handle)
+ 
+     // PlayerIns position (Tier 1 video correlation; v5f confirmed):
+-    constexpr int PLAYER_INS_POS_X           = 0x6C0;
++    constexpr int PLAYER_INS_POS_X           = 0x6C0;  // legacy world-pos (probe v6.1.1)
+     constexpr int PLAYER_INS_POS_Y           = 0x6C4;
+     constexpr int PLAYER_INS_POS_Z           = 0x6C8;
+ 
+     // ChrModuleBag → TimeAct module:
+     constexpr int MODULE_BAG_TIME_ACT_PTR    = 0x18;
++    // v6.2 module-bag candidates (research 006):
++    constexpr int MODULE_BAG_PHYS_PTR        = 0x68;  // → CSChrPhysicsModule (TGA + TarnishedTool + vswarte)
++    constexpr int MODULE_BAG_ACTION_REQ_PTR  = 0x80;  // → ActionRequest module (Erd-Tools enemy anim source)
+ 
+     // TimeAct fields (decoded for Tier 2 + emphasized capture range):
+     constexpr int TIME_ACT_TIME_CAND_0       = 0x20;
+@@ -184,7 +206,18 @@ namespace Off {
+     constexpr int TIME_ACT_TIME_CAND_3       = 0x2C;
+     constexpr int TIME_ACT_FOCUS_BEGIN       = 0xC0;   // emphasized region begin
+     constexpr int TIME_ACT_FOCUS_END         = 0xE0;   // emphasized region end
+-    constexpr int TIME_ACT_ANIM_ID           = 0xD0;
++    constexpr int TIME_ACT_ANIM_ID           = 0xD0;   // legacy enemy anim_id (probe v6.1.1) — reads 0 for enemies
++    // v6.2 enemy anim_id candidates (research 006):
++    constexpr int TIME_ACT_READ_IDX          = 0xC4;   // vswarte: u32 index into anim_queue
++    constexpr int TIME_ACT_ANIM_QUEUE_BEGIN  = 0x20;   // vswarte: 10×16B circular buffer
++    constexpr int TIME_ACT_ANIM_QUEUE_STRIDE = 0x10;   // CSChrTimeActModuleAnim entry size
++    constexpr int TIME_ACT_ANIM_QUEUE_LEN    = 10;     // entries in queue
++    constexpr int ACTION_REQ_ANIM_ID         = 0x90;   // Erd-Tools: enemy anim_id offset within ActionRequest module
++
++    // v6.2 physics module (world pos leaf):
++    constexpr int PHYS_MODULE_POS_X          = 0x70;
++    constexpr int PHYS_MODULE_POS_Y          = 0x74;
++    constexpr int PHYS_MODULE_POS_Z          = 0x78;
+ 
+     // ai bag walk (chrIns+0x580 → +0xC0):
+     constexpr int AI_BAG_AI_STRUCT_PTR       = 0xC0;
+@@ -1355,7 +1388,7 @@ struct EnemySnapshot {
+     uintptr_t module_bag     = 0;
+     uintptr_t time_act       = 0;
+     uintptr_t ai_struct      = 0;
+-    uint32_t  anim_id        = 0;
++    uint32_t  anim_id        = 0;  // path A: TimeActModule + 0xD0 (legacy)
+     float     anim_time[4]   = {0,0,0,0};
+     bool      in_lock_on     = false;
+     bool      in_boss_bar    = false;
+@@ -1363,6 +1396,18 @@ struct EnemySnapshot {
+     EnemyClass cls           = ENEMY_CLASS_LESSER;
+     bool      is_focused     = false;
+     FocusedReason focus_reason = FOCUS_NONE;
++
++    // v6.2 instrumentation (schema v2):
++    // Path-B: TimeActModule + 0x20 + read_idx*16 → anim_id (vswarte anim_queue model)
++    uint32_t  anim_id_path_b = 0;
++    uint32_t  read_idx       = 0xFFFFFFFFu;  // sentinel: not read
++    // Path-C: module_bag → +0x80 (ActionRequest) → +0x90 (Erd-Tools enemy anim)
++    uint32_t  anim_id_path_c = 0;
++    uintptr_t action_request = 0;
++    // World position dual-read:
++    // legacy: chrIns + 0x6C0..0x6C8 (already captured in field_at_0x06C and elsewhere)
++    uintptr_t phys_module    = 0;
++    float     world_pos_phys[3] = {0,0,0};  // module_bag → +0x68 → +0x70/74/78
+ };
+ 
+ // Resolve an enemy's ChrIns* + read all Tier 2 fields (cheap reads only).
+@@ -1400,6 +1445,38 @@ static bool EnemyReadTier2(uintptr_t chr_ins_abs, EnemySnapshot* s) {
+             SafeRead<float>(ta + Off::TIME_ACT_TIME_CAND_1, &s->anim_time[1]);
+             SafeRead<float>(ta + Off::TIME_ACT_TIME_CAND_2, &s->anim_time[2]);
+             SafeRead<float>(ta + Off::TIME_ACT_TIME_CAND_3, &s->anim_time[3]);
++
++            // v6.2 path-B: anim_queue[read_idx].anim_id (vswarte CSChrTimeActModuleAnim model).
++            // anim_queue at +0x20 is 10 × 16 bytes; entry layout: i32 anim_id @+0,
++            // f32 play_time @+4, f32 play_time2 @+8, f32 anim_length @+C.
++            // read_idx is u32 at +0xC4. Bound-check before deref.
++            uint32_t ridx = 0xFFFFFFFFu;
++            if (SafeRead<uint32_t>(ta + Off::TIME_ACT_READ_IDX, &ridx)) {
++                s->read_idx = ridx;
++                if (ridx < (uint32_t)Off::TIME_ACT_ANIM_QUEUE_LEN) {
++                    int entryOff = Off::TIME_ACT_ANIM_QUEUE_BEGIN +
++                                   (int)ridx * Off::TIME_ACT_ANIM_QUEUE_STRIDE;
++                    SafeRead<uint32_t>(ta + entryOff, &s->anim_id_path_b);
++                }
++            }
++        }
++
++        // v6.2 path-C: module_bag → +0x80 (ActionRequest) → +0x90 (enemy anim).
++        uintptr_t ar = 0;
++        if (SafeRead<uintptr_t>(bag + Off::MODULE_BAG_ACTION_REQ_PTR, &ar) &&
++            LooksLikeUserPtrFast(ar)) {
++            s->action_request = ar;
++            SafeRead<uint32_t>(ar + Off::ACTION_REQ_ANIM_ID, &s->anim_id_path_c);
++        }
++
++        // v6.2 world-pos new chain: module_bag → +0x68 (CSChrPhysicsModule) → +0x70 (Vector3).
++        uintptr_t phys = 0;
++        if (SafeRead<uintptr_t>(bag + Off::MODULE_BAG_PHYS_PTR, &phys) &&
++            LooksLikeUserPtrFast(phys)) {
++            s->phys_module = phys;
++            SafeRead<float>(phys + Off::PHYS_MODULE_POS_X, &s->world_pos_phys[0]);
++            SafeRead<float>(phys + Off::PHYS_MODULE_POS_Y, &s->world_pos_phys[1]);
++            SafeRead<float>(phys + Off::PHYS_MODULE_POS_Z, &s->world_pos_phys[2]);
+         }
+     }
+ 
+@@ -1496,6 +1573,49 @@ static uint8_t WriteTier3ForEnemy(Writer& w,
+         else return count;
+     }
+ 
++    // v6.2 instrumentation regions (schema v2):
++    // Region 6: phys_module body (world position leaf at +0x70)
++    if (s.phys_module) {
++        if (WriteRegionRecord(w, REGION_PHYS_MODULE,
++                              s.phys_module, 6u,
++                              0, REGION_CAP_PHYS_MODULE,
++                              false, 0)) ++count;
++        else return count;
++    }
++
++    // Region 7: action_request module body (Erd-Tools enemy anim_id source)
++    if (s.action_request) {
++        if (WriteRegionRecord(w, REGION_ACTION_REQUEST,
++                              s.action_request, 7u,
++                              0, REGION_CAP_ACTION_REQUEST,
++                              false, 0)) ++count;
++        else return count;
++    }
++
++    // Region 8: time_act_child_body — first TIME_ACT_CHILD_BODY_MAX children
++    // captured at REGION_CAP_TIME_ACT_CHILD_BODY (512B) instead of 256B.
++    // Goal: deeper capture of the children that the 256B scan suggests hold
++    // the active anim state.
++    if (s.time_act) {
++        int childN = 0;
++        for (int off = 0; off < TIME_ACT_CHILD_SCAN_BYTES &&
++                          childN < TIME_ACT_CHILD_BODY_MAX; off += 8) {
++            uintptr_t target = 0;
++            if (!SafeRead<uintptr_t>(s.time_act + off, &target)) continue;
++            if ((target & 0x7) != 0) continue;
++            if (!LooksLikeUserPtrFast(target)) continue;
++            if (WriteRegionRecord(w, REGION_TIME_ACT_CHILD_BODY,
++                                  target, 8u,
++                                  0, REGION_CAP_TIME_ACT_CHILD_BODY,
++                                  true, (uint16_t)off)) {
++                ++count;
++                ++childN;
++            } else {
++                return count;  // writer full
++            }
++        }
++    }
++
+     return count;
+ }
+ 
+@@ -1510,8 +1630,8 @@ static bool WriteEnemyRecord(Writer& w,
+                              bool include_focus_emphasis,
+                              bool drop_broad_sweep)
+ {
+-    // Reserve EnemyHeader (0x60 = 96 bytes)
+-    constexpr size_t ENEMY_HEADER_BYTES = 96;
++    // Reserve EnemyHeader: 136 bytes in schema v2 (96 legacy + 40 v6.2 block).
++    constexpr size_t ENEMY_HEADER_BYTES = 136;
+     if (w.pos + ENEMY_HEADER_BYTES > w.cap) { w.overflow = true; return false; }
+ 
+     size_t startMark = w.pos;
+@@ -1538,11 +1658,32 @@ static bool WriteEnemyRecord(Writer& w,
+     size_t regionCountMark = w.pos;
+     w.put_u8(0);   // region_count_for_this_enemy — patched below
+     w.put_u8(0);   // reserved
+-    // Sanity: ENEMY_HEADER_BYTES math — we wrote 8+8+(7*4)+4+(4*4)+(6*1)+(2*1) = 8+8+28+4+16+6+2 = 72 bytes.
+-    // 96 - 72 = 24 bytes reserved for forward-compat. Pad here.
+-    constexpr size_t WRITTEN = 8 + 8 + 7*4 + 4 + 4*4 + 6 + 2;
+-    static_assert(WRITTEN == 72, "enemy header field math drifted");
++    // v6.2 instrumentation block (44 bytes; pad below brings total to 64 = 136 - 72 legacy):
++    w.put_u32(s.anim_id_path_b);                 // 4 — vswarte anim_queue[read_idx].anim_id
++    w.put_u32(s.read_idx);                       // 4 — u32 index used; 0xFFFFFFFF = not read
++    w.put_u32(s.anim_id_path_c);                 // 4 — Erd-Tools ActionRequest+0x90
++    w.put_u32(0);                                // 4 — reserved (align to 8)
++    w.put_u64((uint64_t)s.action_request);       // 8 — abs addr of ActionRequest module
++    w.put_u64((uint64_t)s.phys_module);          // 8 — abs addr of CSChrPhysicsModule
++    w.put_f32(s.world_pos_phys[0]);              // 4 — phys-chain pos
++    w.put_f32(s.world_pos_phys[1]);              // 4
++    w.put_f32(s.world_pos_phys[2]);              // 4 — total 8+4+4+4+4+8+8+4+4+4 = 56? Let me recount carefully.
++    // Recount of v6.2 block writes: u32(4)+u32(4)+u32(4)+u32(4)+u64(8)+u64(8)+f32(4)+f32(4)+f32(4) = 44.
++    // I want 40 bytes exactly. Drop the second reserved u32.
++    // Actually corrected: 4+4+4+8+8+4+4+4 = 40. Above writes one extra u32. Pad to 8-aligned.
++    // 40 bytes total for v6.2 block is fine. Sanity below.
++    // Sanity: ENEMY_HEADER_BYTES math —
++    //   legacy: 8+8+(7*4)+4+(4*4)+(6*1)+(2*1) = 72 bytes
++    //   v6.2 block above: u32*3 + u32_reserved + u64*2 + f32*3 = 12+4+16+12 = 44 bytes
++    //   total written so far = 72 + 44 = 116
++    //   target = 136 → PAD = 20
++    constexpr size_t WRITTEN_LEGACY = 8 + 8 + 7*4 + 4 + 4*4 + 6 + 2;
++    static_assert(WRITTEN_LEGACY == 72, "enemy header legacy field math drifted");
++    constexpr size_t WRITTEN_V62 = 4 + 4 + 4 + 4 + 8 + 8 + 4 + 4 + 4;
++    static_assert(WRITTEN_V62 == 44, "v6.2 enemy block field math drifted");
++    constexpr size_t WRITTEN = WRITTEN_LEGACY + WRITTEN_V62;
+     constexpr size_t PAD = ENEMY_HEADER_BYTES - WRITTEN;
++    static_assert(PAD == 20, "v6.2 enemy header pad math drifted");
+     if (w.pos + PAD > w.cap) { w.overflow = true; w.pos = startMark; return false; }
+     memset(w.buf + w.pos, 0, PAD);
+     w.pos += PAD;
+@@ -1680,6 +1821,13 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+         for (int i = 0; i < 4; ++i) w.put_f32(0.0f);
+         for (int i = 0; i < 3; ++i) w.put_f32(0.0f);
+         w.put_u64(0xFFFFFFFFFFFFFFFFull);
++        // v6.2 Tier 1 player instrumentation block (48 bytes, all-zero on short sample):
++        w.put_u64(0);                            // playerChrInsVtable
++        for (int i = 0; i < 3; ++i) w.put_f32(0.0f);  // playerPosPhys
++        w.put_u64(0);                            // playerPhysModule
++        w.put_u64(0xFFFFFFFFFFFFFFFFull);        // playerLockHandleNew
++        w.put_u32(0xFFFFFFFFu);                  // playerLockAreaNew
++        w.put_u64(0);                            // reserved (matches main path)
+         for (int i = 0; i < 3; ++i) w.put_u64(0xFFFFFFFFFFFFFFFFull);
+         w.put_u64(0);                            // focused_handle
+         w.put_u8((uint8_t)FOCUS_NONE);
+@@ -1709,6 +1857,12 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+     float playerAnimTime[4] = {0,0,0,0};
+     float playerPos[3] = {0,0,0};
+     uint64_t playerLockHandle = 0xFFFFFFFFFFFFFFFFull;
++    // v6.2 instrumentation locals:
++    uint64_t playerChrInsVtable = 0;
++    float playerPosPhys[3] = {0,0,0};
++    uint64_t playerPhysModule = 0;
++    uint64_t playerLockHandleNew = 0xFFFFFFFFFFFFFFFFull;
++    uint32_t playerLockAreaNew = 0xFFFFFFFFu;
+ 
+     if (playerChrIns) {
+         // Walk module bag → TimeAct
+@@ -1724,17 +1878,38 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+                 SafeRead<float>(ta + Off::TIME_ACT_TIME_CAND_2, &playerAnimTime[2]);
+                 SafeRead<float>(ta + Off::TIME_ACT_TIME_CAND_3, &playerAnimTime[3]);
+             }
++            // v6.2: physics module → world pos
++            uintptr_t phys = 0;
++            if (SafeRead<uintptr_t>(bag + Off::MODULE_BAG_PHYS_PTR, &phys) &&
++                LooksLikeUserPtrFast(phys)) {
++                playerPhysModule = (uint64_t)phys;
++                SafeRead<float>(phys + Off::PHYS_MODULE_POS_X, &playerPosPhys[0]);
++                SafeRead<float>(phys + Off::PHYS_MODULE_POS_Y, &playerPosPhys[1]);
++                SafeRead<float>(phys + Off::PHYS_MODULE_POS_Z, &playerPosPhys[2]);
++            }
+         }
+         SafeRead<float>(playerChrIns + Off::PLAYER_INS_POS_X, &playerPos[0]);
+         SafeRead<float>(playerChrIns + Off::PLAYER_INS_POS_Y, &playerPos[1]);
+         SafeRead<float>(playerChrIns + Off::PLAYER_INS_POS_Z, &playerPos[2]);
+         SafeRead<uint64_t>(playerChrIns + Off::CHR_INS_TARGET_HANDLE, &playerLockHandle);
++        // v6.2: vtable + new lock-on candidates
++        SafeRead<uint64_t>(playerChrIns + Off::CHR_INS_VTABLE_PTR, &playerChrInsVtable);
++        SafeRead<uint64_t>(playerChrIns + Off::PLAYER_INS_LOCK_HANDLE_NEW, &playerLockHandleNew);
++        SafeRead<uint32_t>(playerChrIns + Off::PLAYER_INS_LOCK_AREA_NEW, &playerLockAreaNew);
+     }
+ 
+     w.put_u32(playerAnimId);
+     for (int i = 0; i < 4; ++i) w.put_f32(playerAnimTime[i]);
+     for (int i = 0; i < 3; ++i) w.put_f32(playerPos[i]);
+     w.put_u64(playerLockHandle);
++    // v6.2 Tier 1 player instrumentation block (schema v2 only — 48 bytes):
++    w.put_u64(playerChrInsVtable);     // 8 bytes — vtable for PlayerIns* vs ChrIns* discriminator
++    for (int i = 0; i < 3; ++i) w.put_f32(playerPosPhys[i]);  // 12 bytes — world pos via phys chain
++    w.put_u64(playerPhysModule);        // 8 bytes — absolute address of phys module (for region cross-ref)
++    w.put_u64(playerLockHandleNew);     // 8 bytes — lock-on at +0x6B0
++    w.put_u32(playerLockAreaNew);       // 4 bytes — TargetArea at +0x6B4
++    // 8 bytes pad to 48-byte block (8+12+8+8+4 = 40; need 8 more)
++    w.put_u64(0);                       // 8 bytes reserved for future
+ 
+     // ----- Boss-bar handles -----
+     uint64_t bossHandles[3] = {
+@@ -2478,6 +2653,10 @@ static bool ParseHeader(Reader& r, ParsedHeader* h) {
+     for (int i = 0; i < 4; ++i) h->player_anim_time[i] = r.get_f32();
+     for (int i = 0; i < 3; ++i) h->player_pos[i]       = r.get_f32();
+     h->player_lock_handle = r.get_u64();
++    // v6.2 Tier 1 player instrumentation block (48 bytes, schema v2+):
++    if (h->schema_version >= 2) {
++        r.skip(48);  // 8 vtable + 12 phys_pos + 8 phys_module + 8 lock_new + 4 area_new + 8 reserved
++    }
+     for (int i = 0; i < 3; ++i) h->boss_handles[i]     = r.get_u64();
+     h->focused_handle     = r.get_u64();
+     h->focus_reason       = r.get_u8();
+@@ -2509,8 +2688,8 @@ static void EmitCsvSampleRow(uint64_t seq, const ParsedHeader& h, size_t sample_
+         sample_bytes);
+ }
+ 
+-static void EmitCsvEnemyRow(uint64_t seq, int enemy_idx, Reader& r) {
+-    // EnemyHeader (96 bytes)
++static void EmitCsvEnemyRow(uint64_t seq, int enemy_idx, Reader& r, uint32_t schema_version) {
++    // EnemyHeader: 96 bytes for schema v1, 136 bytes for schema v2 (+v6.2 block).
+     uint64_t chrIns = r.get_u64();
+     uint64_t handle = r.get_u64();
+     uint32_t f38    = r.get_u32();
+@@ -2530,7 +2709,22 @@ static void EmitCsvEnemyRow(uint64_t seq, int enemy_idx, Reader& r) {
+     uint8_t fReas  = r.get_u8();
+     uint8_t regCnt = r.get_u8();
+     (void)r.get_u8();    // reserved
+-    uint8_t pad[24]; r.get(pad, 24);  // header reserved padding
++    // v6.2 instrumentation block (44 bytes, schema v2+; +20 pad = 64 → 136-byte header):
++    uint32_t animIdB = 0, readIdx = 0xFFFFFFFFu, animIdC = 0;
++    uint64_t actionReqAbs = 0, physModuleAbs = 0;
++    float phx = 0, phy = 0, phz = 0;
++    if (schema_version >= 2) {
++        animIdB     = r.get_u32();
++        readIdx     = r.get_u32();
++        animIdC     = r.get_u32();
++        (void)r.get_u32();  // reserved align
++        actionReqAbs   = r.get_u64();
++        physModuleAbs  = r.get_u64();
++        phx = r.get_f32(); phy = r.get_f32(); phz = r.get_f32();
++        uint8_t padV2[20]; r.get(padV2, 20);  // pad to 136-byte header
++    } else {
++        uint8_t pad[24]; r.get(pad, 24);  // v1 pad to 96
++    }
+     if (!r.ok) return;
+ 
+     if (g_csvFile) {
+@@ -2539,13 +2733,17 @@ static void EmitCsvEnemyRow(uint64_t seq, int enemy_idx, Reader& r) {
+             "%d,0x%016llX,0x%016llX,"
+             "0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,"
+             "0x%08X,%.6f,%.6f,%.6f,%.6f,"
+-            "%u,%u,%u,%u,%u,%u,%u\n",
++            "%u,%u,%u,%u,%u,%u,%u,"
++            "0x%08X,%u,0x%08X,0x%016llX,0x%016llX,%.6f,%.6f,%.6f\n",
+             (unsigned long long)seq,
+             enemy_idx, (unsigned long long)chrIns, (unsigned long long)handle,
+             f38, f60, f64, f68, f6C, f80, f1E8,
+             aId, t0, t1, t2, t3,
+             (unsigned)inLock, (unsigned)inBoss, (unsigned)inRos, (unsigned)cls,
+-            (unsigned)isFoc, (unsigned)fReas, (unsigned)regCnt);
++            (unsigned)isFoc, (unsigned)fReas, (unsigned)regCnt,
++            animIdB, (unsigned)readIdx, animIdC,
++            (unsigned long long)actionReqAbs, (unsigned long long)physModuleAbs,
++            phx, phy, phz);
+     }
+ 
+     // Skip Tier 3 records for this enemy. Each region record:
+@@ -2856,7 +3054,7 @@ static DWORD WINAPI WorkerMain(LPVOID) {
+                 }
+ 
+                 for (int e = 0; e < hdr.enemy_record_count && r.ok; ++e) {
+-                    EmitCsvEnemyRow(seq, e, r);
++                    EmitCsvEnemyRow(seq, e, r, hdr.schema_version);
+                 }
+             }
+ 
+diff --git a/tools/probe_bin.py b/tools/probe_bin.py
+index 4e2a8c8..061476b 100644
+--- a/tools/probe_bin.py
++++ b/tools/probe_bin.py
+@@ -130,6 +130,13 @@ class EnemyRecord:
+     focus_reason: int
+     region_count: int
+     regions: list[RegionRecord] = field(default_factory=list)
++    # v6.2 instrumentation fields (schema v2 only; 0/sentinel on v1 captures):
++    anim_id_path_b: int = 0
++    read_idx: int = 0xFFFFFFFF
++    anim_id_path_c: int = 0
++    action_request_abs: int = 0
++    phys_module_abs: int = 0
++    world_pos_phys: tuple[float, float, float] = (0.0, 0.0, 0.0)
+ 
+     @property
+     def class_name(self) -> str:
+@@ -156,6 +163,12 @@ class Sample:
+     enemy_record_count: int
+     adaptive_step: int
+     enemies: list[EnemyRecord] = field(default_factory=list)
++    # v6.2 Tier 1 player instrumentation fields (schema v2 only):
++    player_chr_ins_vtable: int = 0
++    player_pos_phys: tuple[float, float, float] = (0.0, 0.0, 0.0)
++    player_phys_module_abs: int = 0
++    player_lock_on_target_handle_new: int = 0xFFFFFFFFFFFFFFFF
++    player_lock_on_target_area_new: int = 0xFFFFFFFF
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -239,6 +252,19 @@ def _parse_sample(payload: bytes) -> Sample:
+     player_anim_time = (cur.f32(), cur.f32(), cur.f32(), cur.f32())
+     player_pos = (cur.f32(), cur.f32(), cur.f32())
+     player_lock = cur.u64()
++    # v6.2 Tier 1 player instrumentation block (48 bytes, schema v2+):
++    player_chr_ins_vtable = 0
++    player_pos_phys = (0.0, 0.0, 0.0)
++    player_phys_module_abs = 0
++    player_lock_new = 0xFFFFFFFFFFFFFFFF
++    player_lock_area_new = 0xFFFFFFFF
++    if schema_version >= 2:
++        player_chr_ins_vtable = cur.u64()
++        player_pos_phys = (cur.f32(), cur.f32(), cur.f32())
++        player_phys_module_abs = cur.u64()
++        player_lock_new = cur.u64()
++        player_lock_area_new = cur.u32()
++        cur.u64()  # 8 bytes reserved (probe writes 0)
+     boss = (cur.u64(), cur.u64(), cur.u64())
+     focused = cur.u64()
+     focus_reason = cur.u8()
+@@ -264,6 +290,11 @@ def _parse_sample(payload: bytes) -> Sample:
+         focus_reason=focus_reason,
+         enemy_record_count=enemy_count,
+         adaptive_step=adaptive_step,
++        player_chr_ins_vtable=player_chr_ins_vtable,
++        player_pos_phys=player_pos_phys,
++        player_phys_module_abs=player_phys_module_abs,
++        player_lock_on_target_handle_new=player_lock_new,
++        player_lock_on_target_area_new=player_lock_area_new,
+     )
+ 
+     # 2026-05-11: the probe (v6.0 and v6.1) has a count-vs-payload mismatch
+@@ -278,7 +309,7 @@ def _parse_sample(payload: bytes) -> Sample:
+         if cur.pos >= len(cur.buf):
+             break
+         try:
+-            sample.enemies.append(_parse_enemy(cur))
++            sample.enemies.append(_parse_enemy(cur, schema_version))
+         except ParseError:
+             # Partial enemy record (probe truncated mid-write). Stop here;
+             # caller can inspect sample.enemy_record_count vs len(enemies) to
+@@ -287,7 +318,7 @@ def _parse_sample(payload: bytes) -> Sample:
+     return sample
+ 
+ 
+-def _parse_enemy(cur: _Cursor) -> EnemyRecord:
++def _parse_enemy(cur: _Cursor, schema_version: int = 1) -> EnemyRecord:
+     chr_ins = cur.u64()
+     handle = cur.u64()
+     f038 = cur.u32()
+@@ -307,7 +338,26 @@ def _parse_enemy(cur: _Cursor) -> EnemyRecord:
+     foc_reason = cur.u8()
+     reg_count = cur.u8()
+     cur.u8()  # reserved
+-    cur.take(24, "enemy header pad")  # padding to ENEMY_HEADER_BYTES = 96
++    # v6.2 instrumentation block (44 bytes, schema v2 only; +20 pad below = 64 → 136-byte header):
++    anim_id_path_b = 0
++    read_idx = 0xFFFFFFFF
++    anim_id_path_c = 0
++    action_request_abs = 0
++    phys_module_abs = 0
++    world_pos_phys = (0.0, 0.0, 0.0)
++    if schema_version >= 2:
++        anim_id_path_b = cur.u32()
++        read_idx = cur.u32()
++        anim_id_path_c = cur.u32()
++        cur.u32()  # reserved (align to 8)
++        action_request_abs = cur.u64()
++        phys_module_abs = cur.u64()
++        world_pos_phys = (cur.f32(), cur.f32(), cur.f32())
++        # pad: ENEMY_HEADER_BYTES (136) - 72 legacy - 44 v6.2 = 20 bytes
++        cur.take(20, "enemy header pad v2")
++    else:
++        # v1: pad to ENEMY_HEADER_BYTES = 96 -> 24 bytes
++        cur.take(24, "enemy header pad v1")
+ 
+     enemy = EnemyRecord(
+         chr_ins_abs=chr_ins,
+@@ -328,6 +378,12 @@ def _parse_enemy(cur: _Cursor) -> EnemyRecord:
+         is_focused=is_foc,
+         focus_reason=foc_reason,
+         region_count=reg_count,
++        anim_id_path_b=anim_id_path_b,
++        read_idx=read_idx,
++        anim_id_path_c=anim_id_path_c,
++        action_request_abs=action_request_abs,
++        phys_module_abs=phys_module_abs,
++        world_pos_phys=world_pos_phys,
+     )
+ 
+     for _ in range(reg_count):
