@@ -72,7 +72,17 @@
 // Constants
 // ===========================================================================
 
-#define PROBE_VERSION_STR "v7.0-target-scan"
+#define PROBE_VERSION_STR "v7.1-target-scan"
+// v7.1-target-scan (Phase 4.0 Gate 0.B follow-up, 2026-05-12):
+// v7.0 capture showed zero matches between captured AI-struct/AI-bag/module-bag
+// u64 slots and player_chr_ins, confirming the target field stores a
+// FieldInsHandle, not a pointer. v7.1 captures the player's own handle (at
+// PlayerIns+0x08) into the v6.2 player instrumentation block's reserved
+// 8-byte slot. probe_bin.py already parsed that slot as "reserved (probe
+// writes 0)"; the field is renamed to `player_handle` and old captures
+// continue to parse as `player_handle == 0`. No schema bump needed.
+// All v7.0 regions and capture behavior are preserved unchanged.
+//
 // v7.0-target-scan (Phase 4.0 Gate 0.B research build, 2026-05-11):
 // Adds three new Tier 3 region captures around the AI struct, AI bag, and
 // module bag head, so the offline analyzer (`tools/analyze_target_field.py`)
@@ -1905,7 +1915,7 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
         w.put_u64(0);                            // playerPhysModule
         w.put_u64(0xFFFFFFFFFFFFFFFFull);        // playerLockHandleNew
         w.put_u32(0xFFFFFFFFu);                  // playerLockAreaNew
-        w.put_u64(0);                            // reserved (matches main path)
+        w.put_u64(0);                            // v7.1: playerHandle (zero when player not resolved)
         for (int i = 0; i < 3; ++i) w.put_u64(0xFFFFFFFFFFFFFFFFull);
         w.put_u64(0);                            // focused_handle
         w.put_u8((uint8_t)FOCUS_NONE);
@@ -1978,6 +1988,11 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
     uint64_t playerLockHandleNew = 0xFFFFFFFFFFFFFFFFull;
     uint32_t playerLockAreaNew = 0xFFFFFFFFu;
 
+    // v7.1: read player's own FieldInsHandle at PlayerIns +0x08, used by
+    // analyze_target_field.py to scan boss AI struct for the player handle
+    // (the v7.0 analyzer found zero matches against player_chr_ins pointer,
+    // confirming the target field stores a handle rather than a pointer).
+    uint64_t playerHandle = 0;
     if (playerChrIns) {
         // Walk module bag → TimeAct
         uintptr_t bag = 0;
@@ -2010,6 +2025,9 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
         SafeRead<uint64_t>(playerChrIns + Off::CHR_INS_VTABLE_PTR, &playerChrInsVtable);
         SafeRead<uint64_t>(playerChrIns + Off::PLAYER_INS_LOCK_HANDLE_NEW, &playerLockHandleNew);
         SafeRead<uint32_t>(playerChrIns + Off::PLAYER_INS_LOCK_AREA_NEW, &playerLockAreaNew);
+        // v7.1: player's own FieldInsHandle (at ChrIns+0x08), for target-field
+        // analyzer to scan boss AI struct for handle-shaped matches.
+        SafeRead<uint64_t>(playerChrIns + Off::CHR_INS_HANDLE, &playerHandle);
     }
 
     w.put_u32(playerAnimId);
@@ -2022,8 +2040,11 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
     w.put_u64(playerPhysModule);        // 8 bytes — absolute address of phys module (for region cross-ref)
     w.put_u64(playerLockHandleNew);     // 8 bytes — lock-on at +0x6B0
     w.put_u32(playerLockAreaNew);       // 4 bytes — TargetArea at +0x6B4
-    // 8 bytes pad to 48-byte block (8+12+8+8+4 = 40; need 8 more)
-    w.put_u64(0);                       // 8 bytes reserved for future
+    // v7.1: repurpose the v6.2-reserved 8-byte slot as the player's own
+    // FieldInsHandle (at PlayerIns+0x08). Old v6.4/v7.0 captures wrote 0
+    // here, which probe_bin.py already accepts as the reserved field, so
+    // the wire format change is forward-compatible.
+    w.put_u64(playerHandle);            // 8 bytes — player's own FieldInsHandle
 
     // v6.3: derive an EFFECTIVE lock-on handle for analytics + focus-selection.
     // Research 007 proved +0x6A0 is dead (1 distinct value, 0 transitions in

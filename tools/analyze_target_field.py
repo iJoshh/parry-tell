@@ -95,6 +95,7 @@ class SlotStats:
     samples_nonzero: int = 0
     samples_plausible_ptr: int = 0
     samples_equals_player_ptr: int = 0
+    samples_equals_player_handle: int = 0
     samples_equals_player_lock_handle: int = 0
     distinct_values: set[int] = field(default_factory=set)
     transitions: int = 0
@@ -109,6 +110,7 @@ class SlotStats:
         self,
         value: int,
         player_chr_ins: int,
+        player_handle: int,
         player_lock_handle: int,
     ) -> None:
         self.samples_observed += 1
@@ -118,6 +120,9 @@ class SlotStats:
             self.samples_plausible_ptr += 1
         if player_chr_ins and value == player_chr_ins:
             self.samples_equals_player_ptr += 1
+        if player_handle and player_handle != HANDLE_SENTINEL \
+                and value == player_handle:
+            self.samples_equals_player_handle += 1
         if player_lock_handle and player_lock_handle != HANDLE_SENTINEL \
                 and value == player_lock_handle:
             self.samples_equals_player_lock_handle += 1
@@ -140,6 +145,12 @@ class SlotStats:
         if self.samples_observed == 0:
             return 0.0
         return self.samples_equals_player_ptr / self.samples_observed
+
+    @property
+    def equals_player_handle_rate(self) -> float:
+        if self.samples_observed == 0:
+            return 0.0
+        return self.samples_equals_player_handle / self.samples_observed
 
     @property
     def equals_player_lock_handle_rate(self) -> float:
@@ -191,6 +202,7 @@ def scan_focused_enemy(
             slot.observe_u64(
                 value,
                 sample.player_chr_ins,
+                sample.player_handle,
                 sample.player_lock_on_target_handle,
             )
             observed += 1
@@ -262,24 +274,28 @@ def run_analysis(base_path: Path) -> dict:
 def score_u64(s: SlotStats, max_observed: int) -> float:
     """Score a u64 slot's likelihood of being target-of-attention.
 
-    Dominant signal: equals_player_ptr (boss's target points at Josh's ChrIns).
-    Coverage-weighted: a slot observed once that happens to equal the player
-    must not outrank a slot observed thousands of times with the same rate.
-    Sub-minimum coverage returns 0 regardless of signal.
+    Two equality signals: equals_player_ptr (target stores ChrIns*) and
+    equals_player_handle (target stores FieldInsHandle). Either is a
+    positive answer; we take the MAX, scaled by coverage. The v7.0 capture
+    showed pointer-equality is 0% across all slots, so handle-equality is
+    the expected positive in v7.1+. Coverage-weighted: a slot observed once
+    that happens to equal the player must not outrank a slot observed
+    thousands of times with the same rate. Sub-minimum coverage returns 0.
     """
     if s.samples_observed < MIN_OBSERVATIONS_FOR_RANKING:
         return 0.0
-    # Coverage factor: 1.0 if this slot was captured every focused-enemy
-    # sample in the dataset; less if region truncation or short captures
-    # meant the slot was only observed in a subset.
     coverage = s.samples_observed / max(1, max_observed)
-    # Equals-player is the strongest signal in solo data. Multiplied by
-    # coverage so a one-shot lucky match doesn't dominate.
-    base = s.equals_player_ptr_rate * 100.0 * coverage
-    # Pointer-shape bonus: a slot that looks like a user-space pointer
-    # the vast majority of the time is more interesting than one that
-    # is mostly zero/junk. Drop the speculative "handle-shape" bonus that
-    # Codex flagged as nonzero-equivalent — it was noise.
+    # Equality signal: max of ptr-match-rate and handle-match-rate.
+    # Whichever shape the target field uses, the matching one is the
+    # positive signal. Multiplied by coverage so a single lucky match
+    # can't dominate.
+    eq_rate = max(s.equals_player_ptr_rate, s.equals_player_handle_rate)
+    base = eq_rate * 100.0 * coverage
+    # Pointer-shape bonus: a slot that looks like a user-space pointer the
+    # vast majority of the time is more interesting than one that is mostly
+    # zero/junk. (FieldInsHandle won't pass this filter — it doesn't live
+    # in user-space — but if the handle equality already fires, the base
+    # term will dominate regardless.)
     shape_bonus = s.plausible_ptr_rate * 5.0 * coverage
     # Variety bonus / penalty
     dv = len(s.distinct_values)
@@ -393,7 +409,7 @@ def format_report(result: dict, top_n: int = 30) -> str:
         (s.samples_observed for s in u64_ranked), default=1
     )
     lines.append(
-        "| Rank | Region | StructOff | Samples | =Ptr | =Ptr % | "
+        "| Rank | Region | StructOff | Samples | =Ptr % | =Hdl % | "
         "=LockHdl % | PtrLike % | Distinct | Trans | Score |"
     )
     lines.append("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
@@ -405,8 +421,8 @@ def format_report(result: dict, top_n: int = 30) -> str:
         lines.append(
             f"| {i} | {region_name} | 0x{slot.struct_offset:04X} | "
             f"{slot.samples_observed} | "
-            f"{slot.samples_equals_player_ptr} | "
             f"{slot.equals_player_ptr_rate * 100:.1f} | "
+            f"{slot.equals_player_handle_rate * 100:.1f} | "
             f"{slot.equals_player_lock_handle_rate * 100:.1f} | "
             f"{slot.plausible_ptr_rate * 100:.1f} | "
             f"{len(slot.distinct_values)} | "
@@ -444,12 +460,18 @@ def format_report(result: dict, top_n: int = 30) -> str:
     lines.append("")
     lines.append("## Interpretation guide")
     lines.append("")
-    lines.append("**Strong solo signal for a u64 slot:**")
+    lines.append("**Strong signal for a u64 slot:**")
     lines.append("")
-    lines.append("- `=Ptr %` > 20% (boss often pointed at Josh's ChrIns*)")
-    lines.append("- `PtrLike %` > 80% (slot is consistently a user-space pointer)")
+    lines.append("- `=Ptr %` > 20% — target field stores the player's ChrIns*")
+    lines.append("- `=Hdl %` > 20% — target field stores the player's FieldInsHandle (v7.1+ captures only)")
     lines.append("- 2-16 distinct values (live, not a counter)")
     lines.append("- Located in `ai_struct_head` or `module_bag_head`")
+    lines.append("")
+    lines.append(
+        "Pointer-equality and handle-equality are alternative shapes for the "
+        "same underlying field. Either signal (whichever fires) is the "
+        "positive answer; the analyzer takes the max of the two when scoring."
+    )
     lines.append("")
     lines.append("**Disqualifying signs:**")
     lines.append("")
@@ -459,30 +481,23 @@ def format_report(result: dict, top_n: int = 30) -> str:
         "or pointer churn."
     )
     lines.append(
-        "- `PtrLike %` near 0% but `=Ptr %` > 0%: false match (the slot "
-        "is small ints aliasing zero)."
-    )
-    lines.append("")
-    lines.append("**Known limitation: FieldInsHandle equality is not yet tested.**")
-    lines.append("")
-    lines.append(
-        "The target-of-attention field might store the player's FieldInsHandle "
-        "(at `ChrIns + 0x08`) rather than the player's `ChrIns*`. This "
-        "analyzer currently checks ChrIns* equality only, because the probe "
-        "does not yet capture the player's own handle in the sample header. "
-        "If the top candidates all have low `=Ptr %`, the target field may "
-        "be handle-shaped; a probe extension to log `player_handle` in the "
-        "sample header (one-line change) plus a follow-up analyzer pass "
-        "would close that gap. For tonight, treat the `=Ptr` column as the "
-        "only positive equality signal."
+        "- `PtrLike %` near 0% AND `=Hdl %` = 0: slot is junk u64 noise, "
+        "not a structured identifier."
     )
     lines.append("")
     lines.append(
         "The `=LockHdl %` column matches against the PLAYER'S lock-on TARGET "
-        "handle (the boss's handle when Josh is locked onto it), which is "
-        "not the same as Josh's own handle but IS in the handle encoding "
-        "space. Useful only as a sanity check on shape, not as a positive "
-        "match for target-of-attention."
+        "handle (the boss's handle when Josh is locked onto it). This is "
+        "NOT Josh's own handle — useful only as a sanity check on shape, "
+        "not as a positive match for target-of-attention."
+    )
+    lines.append("")
+    lines.append(
+        "**v7.0 capture compatibility:** v7.0 probe captures wrote 0 in the "
+        "player_handle slot, so `=Hdl %` will be 0 across the board on those "
+        "captures. v7.1+ captures populate it. The analyzer is forward-"
+        "compatible: it scores ptr-equality on v7.0 data and adds handle-"
+        "equality on v7.1+."
     )
     lines.append("")
     lines.append("**Required next step before locking a candidate:**")

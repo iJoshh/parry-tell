@@ -179,6 +179,11 @@ class Sample:
     player_phys_module_abs: int = 0
     player_lock_on_target_handle_new: int = 0xFFFFFFFFFFFFFFFF
     player_lock_on_target_area_new: int = 0xFFFFFFFF
+    # v7.1: player's own FieldInsHandle (at PlayerIns+0x08). On pre-v7.1
+    # captures the wire slot was probe-reserved and written as 0, so we
+    # decode 0 there as "handle not available" — same fallback path as
+    # short-sample-rows that couldn't resolve the player.
+    player_handle: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -268,13 +273,17 @@ def _parse_sample(payload: bytes) -> Sample:
     player_phys_module_abs = 0
     player_lock_new = 0xFFFFFFFFFFFFFFFF
     player_lock_area_new = 0xFFFFFFFF
+    player_handle = 0
     if schema_version >= 2:
         player_chr_ins_vtable = cur.u64()
         player_pos_phys = (cur.f32(), cur.f32(), cur.f32())
         player_phys_module_abs = cur.u64()
         player_lock_new = cur.u64()
         player_lock_area_new = cur.u32()
-        cur.u64()  # 8 bytes reserved (probe writes 0)
+        # v7.1: this 8-byte slot is the player's own FieldInsHandle. On
+        # pre-v7.1 captures the probe wrote 0 here; we decode 0 as "handle
+        # unavailable" and let the analyzer/consumer fall back accordingly.
+        player_handle = cur.u64()
     boss = (cur.u64(), cur.u64(), cur.u64())
     focused = cur.u64()
     focus_reason = cur.u8()
@@ -305,6 +314,7 @@ def _parse_sample(payload: bytes) -> Sample:
         player_phys_module_abs=player_phys_module_abs,
         player_lock_on_target_handle_new=player_lock_new,
         player_lock_on_target_area_new=player_lock_area_new,
+        player_handle=player_handle,
     )
 
     # 2026-05-11: the probe (v6.0 and v6.1) has a count-vs-payload mismatch
