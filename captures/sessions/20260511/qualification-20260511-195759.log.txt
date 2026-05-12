@@ -1,0 +1,7 @@
+382900302 roster: disabled (fall back)
+382900402 ready: armed via F11
+383333509 F11: roster recheck attempt
+383333515 F11: roster ENABLED on retry
+383333515 F11: armed
+383363518 roster_check7_warn: 30s after first arm in qualification mode, no boss-bar enemy has appeared in roster span. Roster confidence reduced.
+383477181 F11: disarmed

@@ -1,0 +1,31 @@
+{
+  "session": "qualification-20260511-195759",
+  "armed_intervals_ms_rel": [
+    [
+      383333515,
+      383477181
+    ]
+  ],
+  "segments": [
+    {
+      "index": 0,
+      "label": "seg00",
+      "ts_start_ms_rel": 493737,
+      "ts_end_ms_rel": 637403,
+      "duration_ms": 143666,
+      "sample_count": 12467,
+      "sample_first_idx": 0,
+      "sample_last_idx": 12466,
+      "focused_rows": 12467,
+      "distinct_focused_cids": {
+        "4311": 9265,
+        "4382": 1217,
+        "1000": 794,
+        "100": 745,
+        "8000": 331,
+        "4080": 115
+      },
+      "open_interval": false
+    }
+  ]
+}

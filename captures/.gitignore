@@ -1,0 +1,7 @@
+# Raw probe captures (potentially many GB each). The segment manifests
+# (.segments.json) and analyst reports stay tracked. Re-archive on demand
+# via tools/archive_session.sh.
+sessions/*/*.bin
+sessions/*/*.bin.[0-9][0-9][0-9]
+sessions/*/*.csv
+sessions/*/STATION-*.log

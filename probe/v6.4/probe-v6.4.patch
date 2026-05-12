@@ -1,0 +1,256 @@
+diff --git a/probe/probe.cpp b/probe/probe.cpp
+index a0f9bc8..c3e6db1 100644
+--- a/probe/probe.cpp
++++ b/probe/probe.cpp
+@@ -72,19 +72,38 @@
+ // Constants
+ // ===========================================================================
+ 
+-#define PROBE_VERSION_STR "v6.3"
+-// v6.3 (research 007 follow-up): v6.2 instrumentation resolved Q1 (world pos)
+-// and Q3 (player lock-on); Q2 (enemy anim_id) was a dead end — none of paths
+-// A/B/C produced c4380 anim IDs in the v6.2 capture (8,773 focused rows of a
+-// c4382 Knight all read sentinel/zero). v6.3:
+-//   - switches in_lock_on derivation to PlayerIns +0x6B0 (fixes focus_reason=3
+-//     bug + boss-bar gating; +0x6A0 read is removed from the analytics path
+-//     but kept in wire format for backward compat at value=0)
+-//   - adds REGION_MODULE_BAG_MEMBER (id 9): wide scan of module_bag[0..0x100]
+-//     at 8-byte stride, capturing 512B body of every valid pointer. Up to 16
+-//     modules per focused enemy. This is the v6.3 hypothesis for finding the
+-//     enemy anim_id — it lives on a module we haven't enumerated.
+-//   - schema stays at v2 (only additive region IDs, no header layout change)
++#define PROBE_VERSION_STR "v6.4"
++// v6.4 (production after research-007 v6.3 capture analysis): the v6.3 capture
++// resolved ALL THREE research-006 offset questions with high confidence:
++//   Q1 world pos: phys-chain (bag→+0x68→+0x70) wins; legacy +0x6C0 also works
++//                 for player (chunk wraps on phys).
++//   Q2 enemy anim_id: TimeAct + 0xD0 (path A, the ORIGINAL v6.1.1 offset) is
++//                 correct. v6.2 was a false-alarm sample — focused enemy was
++//                 not actively animating. v6.3 (12,467 focused rows of c4311
++//                 Soldier + c4382 Knight) showed 8,265 nonzero anim_id reads
++//                 with 89 transitions and clean anim_time monotonicity at
++//                 +0x24 and +0x28.
++//   Q3 player lock-on: +0x6B0 (FieldInsHandle), +0x6B4 (TargetArea u32).
++//                 v6.3 fixed in_lock_on derivation via playerLockHandleEffective.
++//
++// v6.4 changes:
++//   - drops Tier 3 instrumentation regions 6/7/8/9 (phys_module_body,
++//     action_request_body, time_act_child_body, module_bag_member). Their
++//     purpose is done. The values we need (phys pos, anim candidates,
++//     pointer absolute addresses) are in the v6.2 enemy/player header block.
++//   - excludes ALL WCM_PLAYER_ARRAY slots (not just slot 0) from the roster
++//     sweep so co-op friendlies aren't picked as focused enemies by
++//     focus_reason=qualification_nearest.
++//   - adds audible F11 feedback: MessageBeep with distinct tones for
++//     ARMED vs DISARMED so Josh can hear the transition without an overlay.
++//   - schema stays at v2 (region drops are additive — parser tolerates
++//     missing region IDs cleanly; v6.2/v6.3 captures still parse).
++//
++// Future re-analysis: every wire-format field that was added in v6.2/v6.3
++// (anim_id_path_b, anim_id_path_c, read_idx, action_request, phys_module,
++// world_pos_phys, player_chr_ins_vtable, player_pos_phys, player_phys_module,
++// player_lock_new, player_lock_area_new, legacy lock @ +0x6A0) STAYS in the
++// wire format — we keep all good data flowing.
+ #define PROBE_SCHEMA_VERSION 2u
+ 
+ // Buffer pool sized per spec §buffer pool sizing (rev4):
+@@ -1591,84 +1610,12 @@ static uint8_t WriteTier3ForEnemy(Writer& w,
+         else return count;
+     }
+ 
+-    // v6.2 instrumentation regions (schema v2):
+-    // Region 6: phys_module body (world position leaf at +0x70)
+-    if (s.phys_module) {
+-        if (WriteRegionRecord(w, REGION_PHYS_MODULE,
+-                              s.phys_module, 6u,
+-                              0, REGION_CAP_PHYS_MODULE,
+-                              false, 0)) ++count;
+-        else return count;
+-    }
+-
+-    // Region 7: action_request module body (Erd-Tools enemy anim_id source)
+-    if (s.action_request) {
+-        if (WriteRegionRecord(w, REGION_ACTION_REQUEST,
+-                              s.action_request, 7u,
+-                              0, REGION_CAP_ACTION_REQUEST,
+-                              false, 0)) ++count;
+-        else return count;
+-    }
+-
+-    // Region 8: time_act_child_body — DIFFERENT children than Region 4, at
+-    // deeper 512B body. Region 4 scans offsets [0, 0x800) and takes the first
+-    // TIME_ACT_CHILD_MAX (8) valid pointers; Region 8 scans the SECOND HALF
+-    // of the same span [0x400, 0x800) so Region 4 and Region 8 never overlap
+-    // in source_chain. Goal: widen the captured surface of the TimeAct head
+-    // pointer table — if the real active-anim child is at e.g. offset 0x408,
+-    // Region 4's 8-children cap can miss it but Region 8 will pick it up.
+-    // (Codex deep-review P1 #2: prevent silent under-capture.)
+-    if (s.time_act) {
+-        constexpr int R8_SCAN_START = TIME_ACT_CHILD_SCAN_BYTES / 2;  // 0x400
+-        int childN = 0;
+-        for (int off = R8_SCAN_START; off < TIME_ACT_CHILD_SCAN_BYTES &&
+-                          childN < TIME_ACT_CHILD_BODY_MAX; off += 8) {
+-            uintptr_t target = 0;
+-            if (!SafeRead<uintptr_t>(s.time_act + off, &target)) continue;
+-            if ((target & 0x7) != 0) continue;
+-            if (!LooksLikeUserPtrFast(target)) continue;
+-            if (WriteRegionRecord(w, REGION_TIME_ACT_CHILD_BODY,
+-                                  target, 8u,
+-                                  0, REGION_CAP_TIME_ACT_CHILD_BODY,
+-                                  true, (uint16_t)off)) {
+-                ++count;
+-                ++childN;
+-            } else {
+-                return count;  // writer full
+-            }
+-        }
+-    }
+-
+-    // v6.3 Region 9: module_bag_member — scan ChrModuleBag head [0..0x100]
+-    // at 8-byte stride, capture 512B body of every valid pointer. This is
+-    // the catch-all for finding where the enemy anim_id actually lives,
+-    // since paths A/B/C through TimeAct + ActionRequest were all dead in
+-    // the v6.2 capture. source_chain offset tells the analyzer which bag
+-    // slot each captured body came from. No dedupe vs regions 1/2/6/7 — a
+-    // bag member that's also captured as REGION_TIME_ACT_MODULE etc. is
+-    // intentionally captured TWICE so the analyzer has one canonical
+-    // "what's in the bag" sweep + the existing tailored regions for the
+-    // modules we already understand. Cap MODULE_BAG_MEMBER_MAX = 16 well
+-    // exceeds the expected ~10 populated slots in the bag head.
+-    if (s.module_bag) {
+-        int memberN = 0;
+-        for (int off = 0; off < MODULE_BAG_MEMBER_SCAN_BYTES &&
+-                          memberN < MODULE_BAG_MEMBER_MAX; off += 8) {
+-            uintptr_t target = 0;
+-            if (!SafeRead<uintptr_t>(s.module_bag + off, &target)) continue;
+-            if ((target & 0x7) != 0) continue;
+-            if (!LooksLikeUserPtrFast(target)) continue;
+-            if (WriteRegionRecord(w, REGION_MODULE_BAG_MEMBER,
+-                                  target, 9u,
+-                                  0, REGION_CAP_MODULE_BAG_MEMBER,
+-                                  true, (uint16_t)off)) {
+-                ++count;
+-                ++memberN;
+-            } else {
+-                return count;  // writer full
+-            }
+-        }
+-    }
++    // v6.4: regions 6/7/8/9 are DROPPED. They were instrumentation for
++    // research-006/007 and their purpose is done. Region IDs stay reserved
++    // in the enum so old captures still parse correctly. The values they
++    // captured (phys pos, anim candidates B/C, module pointer absolutes)
++    // are still in the v6.2 header block on every focused row, so future
++    // re-analysis can still work with that header data.
+ 
+     return count;
+ }
+@@ -1905,7 +1852,13 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+     w.put_u64((uint64_t)wcm);
+     w.put_u64((uint64_t)g_refs.er_module_base);
+ 
+-    // ----- Resolve player slot 0 -----
++    // ----- Resolve player slot 0 (local player) AND all other WCM_PLAYER
++    // slots so the roster sweep can exclude friendlies in co-op sessions.
++    // v6.4 co-op safety: when Josh plays Seamless Coop with up to 5 friends,
++    // those friendlies are in the roster span — without exclusion,
++    // focus_reason=qualification_nearest will latch onto whoever's closest,
++    // not the boss. The boss-bar path still picks bosses via
++    // boss_bar_handles[]; this is only for the nearest-fallback case.
+     uintptr_t playerSlotAddr = wcm + Off::WCM_PLAYER_ARRAY;
+     uintptr_t playerSlot = 0;
+     SafeRead<uintptr_t>(playerSlotAddr, &playerSlot);
+@@ -1917,6 +1870,36 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+     }
+     w.put_u64((uint64_t)playerChrIns);
+ 
++    // Collect ALL valid player ChrIns* from the WCM_PLAYER_ARRAY (and the
++    // Seamless Coop extension that may follow it) for friendly-exclusion
++    // during the roster sweep. We scan FRIENDLY_SCAN_SLOTS = 8 slots: 4
++    // for the base game's WCM_PLAYER_ARRAY + up to 4 more for the Seamless
++    // extension that's known to exist past it. Every slot is validated via
++    // LooksLikeUserPtrFast, so non-player slots (unused or out-of-bounds)
++    // are safely ignored. De-dup against same chr_ins. If Seamless ever
++    // extends past 8 slots, this needs to grow — but for tonight's 6-player
++    // lobby this comfortably covers Josh + 5 friends.
++    constexpr int FRIENDLY_SCAN_SLOTS = 8;
++    uintptr_t friendlyPCs[FRIENDLY_SCAN_SLOTS] = {0};
++    int friendlyCount = 0;
++    for (int slot = 0; slot < FRIENDLY_SCAN_SLOTS; ++slot) {
++        uintptr_t slotAddr = wcm + Off::WCM_PLAYER_ARRAY +
++                             (uintptr_t)slot * sizeof(uintptr_t);
++        uintptr_t slotPtr = 0;
++        if (!SafeRead<uintptr_t>(slotAddr, &slotPtr)) continue;
++        if (!LooksLikeUserPtrFast(slotPtr)) continue;
++        uintptr_t friendlyChr = 0;
++        if (!SafeRead<uintptr_t>(slotPtr, &friendlyChr)) continue;
++        if (!LooksLikeUserPtrFast(friendlyChr)) continue;
++        // De-dup against the local player and other slots in our scan.
++        bool already = (friendlyChr == playerChrIns);
++        for (int j = 0; !already && j < friendlyCount; ++j) {
++            if (friendlyPCs[j] == friendlyChr) already = true;
++        }
++        if (already) continue;
++        friendlyPCs[friendlyCount++] = friendlyChr;
++    }
++
+     uint32_t playerAnimId = 0;
+     float playerAnimTime[4] = {0,0,0,0};
+     float playerPos[3] = {0,0,0};
+@@ -2069,7 +2052,17 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+                 // player as an entity (the player IS a CharaIns); without this
+                 // exclusion qualification_nearest picks the player as the
+                 // "closest enemy" because distance to self is zero.
+-                if (chrIns == playerChrIns) continue;
++                // v6.4 co-op extension: also skip all OTHER friendly PCs
++                // collected from WCM_PLAYER_ARRAY (up to PLAYER_ARRAY_LEN = 4
++                // slots; covers Josh + 3 friends; Seamless Coop sessions
++                // with more friends may need PLAYER_ARRAY_LEN bumped).
++                {
++                    bool isFriendly = false;
++                    for (int j = 0; j < friendlyCount; ++j) {
++                        if (chrIns == friendlyPCs[j]) { isFriendly = true; break; }
++                    }
++                    if (isFriendly) continue;
++                }
+                 uintptr_t handleField = chrIns + Off::CHR_INS_HANDLE;
+                 uint64_t h = 0;
+                 if (!SafeRead<uint64_t>(handleField, &h)) continue;
+@@ -2116,8 +2109,15 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+                 uintptr_t chrIns = 0;
+                 if (!SafeRead<uintptr_t>(slotPtr, &chrIns)) continue;
+                 if (!LooksLikeUserPtrFast(chrIns)) continue;
+-                // v6.1.1: skip the player chr_ins (see priority-pass note).
+-                if (chrIns == playerChrIns) continue;
++                // v6.4 co-op extension: skip all friendly PCs (was v6.1.1
++                // skipping only local player). See priority-pass note above.
++                {
++                    bool isFriendly = false;
++                    for (int j = 0; j < friendlyCount; ++j) {
++                        if (chrIns == friendlyPCs[j]) { isFriendly = true; break; }
++                    }
++                    if (isFriendly) continue;
++                }
+                 uintptr_t handleField = chrIns + Off::CHR_INS_HANDLE;
+                 uint64_t h = 0;
+                 if (!SafeRead<uint64_t>(handleField, &h)) continue;
+@@ -3361,9 +3361,19 @@ DWORD WINAPI F11Thread(LPVOID) {
+             if (!was) {
+                 BootLog("F11: armed");
+                 LogF("F11: armed");
++                // v6.4 audible feedback: ARMED = two short low beeps (~250ms total).
++                // 660 Hz is a comfortable mid-low tone, distinct from disarm.
++                // Beep() blocks the calling thread — fine here, F11Thread is
++                // dedicated and the 50ms sleep loop accommodates extra latency.
++                Beep(660, 100);
++                Beep(660, 100);
+             } else {
+                 BootLog("F11: disarmed");
+                 LogF("F11: disarmed");
++                // v6.4 audible feedback: DISARMED = one long high beep (~400ms).
++                // 1320 Hz (octave above arm tone) + longer duration makes it
++                // obviously different from ARMED even if you missed the visual.
++                Beep(1320, 400);
+             }
+         }
+         prev = pressed;
