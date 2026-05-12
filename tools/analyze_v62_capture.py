@@ -326,10 +326,15 @@ def q2_anim_id(
     read_idx_counter = Counter(read_idx_vals)
 
     # Byte-level scans in regions 6/7/8/9. v6.3: region 9 (module_bag_member)
-    # was added so the analyzer covers the wide module-bag sweep. Hit keys
-    # include source_chain (= module-bag offset for region 9, time_act head
-    # offset for regions 4/8) so hits from different module-bag slots don't
-    # collapse into a single false signal.
+    # was added so the analyzer covers the wide module-bag sweep.
+    #
+    # IMPORTANT wire quirk:
+    # - For child/scan style regions (4/8/9), probe currently writes the
+    #   source slot offset in `child_source_offset_in_time_act` (u16).
+    # - `source_chain` is written as a region tag constant (4/8/9).
+    #
+    # So for grouped hit keys we use child_source_offset when available;
+    # otherwise fall back to source_chain.
     hit_counts: Counter[tuple[str, int, int, int, int]] = Counter()
     hit_examples: dict[tuple[str, int, int, int, int], tuple[int, int, int, str]] = {}
     rows_with_any_hit = 0
@@ -341,7 +346,11 @@ def q2_anim_id(
             if r.region_id not in (6, 7, 8, 9):
                 continue
             rows_region_presence[r.region_id] += 1
-            src_chain = r.source_chain  # bag/timeact offset for grouped hits
+            src_chain = (
+                r.child_source_offset_in_time_act
+                if r.has_child_offset
+                else r.source_chain
+            )
             payload = r.payload
             for off in range(0, len(payload) - 3, 4):
                 b = payload[off : off + 4]
@@ -416,8 +425,31 @@ def q2_anim_id(
             {
                 "kind": k[0],
                 "region_id": k[1],
-                "source_chain": k[2],   # bag offset (region 9) or time_act head offset (regions 4/8)
-                "offset": k[3],         # offset within the captured 512B body
+                "source_chain": k[2],  # bag slot offset (R9) or source offset (child scans)
+                "offset": k[3],  # offset within the captured 512B body
+                "value": k[4],
+                "count": c,
+                "pct_rows": pct(c, len(focused_rows)),
+                "example_ts_ms_rel": ex[0],
+                "example_handle": ex[1],
+                "example_region_base": ex[2],
+                "example_bytes": ex[3],
+            }
+        )
+
+    top_u32_hits = []
+    for k, c in sorted(
+        ((k, c) for k, c in hit_counts.items() if k[0] in ("u32le", "u32be")),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )[:20]:
+        ex = hit_examples[k]
+        top_u32_hits.append(
+            {
+                "kind": k[0],
+                "region_id": k[1],
+                "source_chain": k[2],
+                "offset": k[3],
                 "value": k[4],
                 "count": c,
                 "pct_rows": pct(c, len(focused_rows)),
@@ -495,6 +527,7 @@ def q2_anim_id(
         "rows_with_any_hit": rows_with_any_hit,
         "hit_counts": hit_counts,
         "top_hits": top_hits,
+        "top_u32_hits": top_u32_hits,
         "action_req_0x90": action_req_0x90,
         "time_act_q0": time_act_q0,
         "time_act_w_r_idx": time_act_w_r_idx,
@@ -786,8 +819,9 @@ def render_report(
     )
     lines.append(f"- rows with any scan hit (u32/u16/u32-be): `{q2['rows_with_any_hit']}/{focused_count}`")
 
-    u32_hits = [h for h in q2["top_hits"] if h["kind"].startswith("u32")]
-    lines.append(f"- u32-aligned hits total keys: `{len(u32_hits)}` (top below)")
+    total_u32_keys = sum(1 for k in q2["hit_counts"] if k[0] in ("u32le", "u32be"))
+    u32_hits = q2.get("top_u32_hits", [])
+    lines.append(f"- u32-aligned hits total keys: `{total_u32_keys}` (top below)")
     for h in u32_hits[:10]:
         # For region 9 the source_chain is the module-bag offset; for regions
         # 4/8 it's the time_act head offset. Render so the bag slot is visible.
