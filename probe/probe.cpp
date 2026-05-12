@@ -72,11 +72,19 @@
 // Constants
 // ===========================================================================
 
-#define PROBE_VERSION_STR "v6.2"
-// v6.2 (research 006 instrumentation): adds dual-read candidates for world
-// position, enemy anim_id, and player lock-on. Schema bumped to v2 to encode
-// the new per-row fields + 3 new region IDs. Analyzers MUST tolerate v2 to
-// read v6.2 captures.
+#define PROBE_VERSION_STR "v6.3"
+// v6.3 (research 007 follow-up): v6.2 instrumentation resolved Q1 (world pos)
+// and Q3 (player lock-on); Q2 (enemy anim_id) was a dead end — none of paths
+// A/B/C produced c4380 anim IDs in the v6.2 capture (8,773 focused rows of a
+// c4382 Knight all read sentinel/zero). v6.3:
+//   - switches in_lock_on derivation to PlayerIns +0x6B0 (fixes focus_reason=3
+//     bug + boss-bar gating; +0x6A0 read is removed from the analytics path
+//     but kept in wire format for backward compat at value=0)
+//   - adds REGION_MODULE_BAG_MEMBER (id 9): wide scan of module_bag[0..0x100]
+//     at 8-byte stride, capturing 512B body of every valid pointer. Up to 16
+//     modules per focused enemy. This is the v6.3 hypothesis for finding the
+//     enemy anim_id — it lives on a module we haven't enumerated.
+//   - schema stays at v2 (only additive region IDs, no header layout change)
 #define PROBE_SCHEMA_VERSION 2u
 
 // Buffer pool sized per spec §buffer pool sizing (rev4):
@@ -107,6 +115,14 @@ static constexpr size_t REGION_CAP_ACTION_REQUEST   = 0x200;   //  512 — Actio
 static constexpr size_t REGION_CAP_TIME_ACT_CHILD_BODY = 0x200; // 512 — first 3 TimeAct child bodies (wider than 0x100 child scan)
 static constexpr int    TIME_ACT_CHILD_BODY_MAX     = 3;       // cap deep-body children per entity (instrumentation)
 
+// v6.3 instrumentation regions (research 007 follow-up): module-bag-wide scan
+// to find where the enemy anim_id actually lives. Module bag is ~256 bytes of
+// pointer table at ChrIns+0x190; we capture the body of every valid pointer
+// in [0..0x100] at 8-byte stride.
+static constexpr size_t REGION_CAP_MODULE_BAG_MEMBER = 0x200;   //  512 — module body
+static constexpr int    MODULE_BAG_MEMBER_SCAN_BYTES = 0x100;   //  256 bytes of bag head scanned
+static constexpr int    MODULE_BAG_MEMBER_MAX        = 16;      //  cap modules captured per focused enemy
+
 // Region IDs (spec §Region-relative offsets rev3):
 enum RegionId : uint8_t {
     REGION_CHR_INS_ROOT          = 0,
@@ -119,6 +135,8 @@ enum RegionId : uint8_t {
     REGION_PHYS_MODULE           = 6,   // ChrPhysicsModule body (world pos leaf)
     REGION_ACTION_REQUEST        = 7,   // ActionRequest module body (enemy anim_id alt path)
     REGION_TIME_ACT_CHILD_BODY   = 8,   // first 3 TimeActChild bodies (deeper capture)
+    // v6.3 instrumentation (research 007 follow-up):
+    REGION_MODULE_BAG_MEMBER     = 9,   // body of any valid pointer in module bag head [0..0x100]
 };
 
 // Capture modes (spec §Modes):
@@ -1621,6 +1639,37 @@ static uint8_t WriteTier3ForEnemy(Writer& w,
         }
     }
 
+    // v6.3 Region 9: module_bag_member — scan ChrModuleBag head [0..0x100]
+    // at 8-byte stride, capture 512B body of every valid pointer. This is
+    // the catch-all for finding where the enemy anim_id actually lives,
+    // since paths A/B/C through TimeAct + ActionRequest were all dead in
+    // the v6.2 capture. source_chain offset tells the analyzer which bag
+    // slot each captured body came from. No dedupe vs regions 1/2/6/7 — a
+    // bag member that's also captured as REGION_TIME_ACT_MODULE etc. is
+    // intentionally captured TWICE so the analyzer has one canonical
+    // "what's in the bag" sweep + the existing tailored regions for the
+    // modules we already understand. Cap MODULE_BAG_MEMBER_MAX = 16 well
+    // exceeds the expected ~10 populated slots in the bag head.
+    if (s.module_bag) {
+        int memberN = 0;
+        for (int off = 0; off < MODULE_BAG_MEMBER_SCAN_BYTES &&
+                          memberN < MODULE_BAG_MEMBER_MAX; off += 8) {
+            uintptr_t target = 0;
+            if (!SafeRead<uintptr_t>(s.module_bag + off, &target)) continue;
+            if ((target & 0x7) != 0) continue;
+            if (!LooksLikeUserPtrFast(target)) continue;
+            if (WriteRegionRecord(w, REGION_MODULE_BAG_MEMBER,
+                                  target, 9u,
+                                  0, REGION_CAP_MODULE_BAG_MEMBER,
+                                  true, (uint16_t)off)) {
+                ++count;
+                ++memberN;
+            } else {
+                return count;  // writer full
+            }
+        }
+    }
+
     return count;
 }
 
@@ -1926,6 +1975,18 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
     // 8 bytes pad to 48-byte block (8+12+8+8+4 = 40; need 8 more)
     w.put_u64(0);                       // 8 bytes reserved for future
 
+    // v6.3: derive an EFFECTIVE lock-on handle for analytics + focus-selection.
+    // Research 007 proved +0x6A0 is dead (1 distinct value, 0 transitions in
+    // 8,773 samples) while +0x6B0 tracks reality (17 transitions correlating
+    // with intentional lock-on toggles). Prefer +0x6B0 when valid; fall back
+    // to +0x6A0 (with a sentinel check) only as belt-and-braces in case the
+    // +0x6B0 read returns wild data on some future game state we haven't
+    // observed.
+    uint64_t playerLockHandleEffective = 0xFFFFFFFFFFFFFFFFull;
+    if (playerLockHandleNew != 0xFFFFFFFFFFFFFFFFull && playerLockHandleNew != 0) {
+        playerLockHandleEffective = playerLockHandleNew;
+    }
+
     // ----- Boss-bar handles -----
     uint64_t bossHandles[3] = {
         0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull
@@ -1995,7 +2056,8 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
             for (int b = 0; b < 3; ++b) {
                 if (bossHandles[b] != 0xFFFFFFFFFFFFFFFFull && bossHandles[b] != 0) ++prioWanted;
             }
-            if (playerLockHandle != 0xFFFFFFFFFFFFFFFFull && playerLockHandle != 0) ++prioWanted;
+            // v6.3: use +0x6B0 (effective) for analytics; +0x6A0 was confirmed dead.
+            if (playerLockHandleEffective != 0xFFFFFFFFFFFFFFFFull && playerLockHandleEffective != 0) ++prioWanted;
 
             int prioFound = 0;
             for (int i = 0; i < count && prioFound < prioWanted && nWork < WORK_CAP; ++i) {
@@ -2019,7 +2081,7 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
                 for (int b = 0; b < 3; ++b) {
                     if (bossHandles[b] == h) { isPrio = true; inBoss = true; break; }
                 }
-                if (h == playerLockHandle && playerLockHandle != 0xFFFFFFFFFFFFFFFFull) {
+                if (h == playerLockHandleEffective && playerLockHandleEffective != 0xFFFFFFFFFFFFFFFFull) {
                     isPrio = true; isLock = true;
                 }
                 if (!isPrio) continue;
@@ -2097,9 +2159,9 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
     // Choose focused-enemy by spec priority:
     //   1. lock-on  2. boss-bar slot 0  3. qualification: nearest  4. none
     int focusedWorkIdx = -1;
-    if (playerLockHandle != 0xFFFFFFFFFFFFFFFFull && playerLockHandle != 0) {
+    if (playerLockHandleEffective != 0xFFFFFFFFFFFFFFFFull && playerLockHandleEffective != 0) {
         for (int i = 0; i < nWork; ++i) {
-            if (work[i].handle == playerLockHandle) {
+            if (work[i].handle == playerLockHandleEffective) {
                 focusedWorkIdx = i;
                 focusReason = FOCUS_LOCK_ON;
                 break;

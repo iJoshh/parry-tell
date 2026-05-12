@@ -1,0 +1,273 @@
+diff --git a/probe/probe.cpp b/probe/probe.cpp
+index 1d238d3..a0f9bc8 100644
+--- a/probe/probe.cpp
++++ b/probe/probe.cpp
+@@ -72,11 +72,19 @@
+ // Constants
+ // ===========================================================================
+ 
+-#define PROBE_VERSION_STR "v6.2"
+-// v6.2 (research 006 instrumentation): adds dual-read candidates for world
+-// position, enemy anim_id, and player lock-on. Schema bumped to v2 to encode
+-// the new per-row fields + 3 new region IDs. Analyzers MUST tolerate v2 to
+-// read v6.2 captures.
++#define PROBE_VERSION_STR "v6.3"
++// v6.3 (research 007 follow-up): v6.2 instrumentation resolved Q1 (world pos)
++// and Q3 (player lock-on); Q2 (enemy anim_id) was a dead end — none of paths
++// A/B/C produced c4380 anim IDs in the v6.2 capture (8,773 focused rows of a
++// c4382 Knight all read sentinel/zero). v6.3:
++//   - switches in_lock_on derivation to PlayerIns +0x6B0 (fixes focus_reason=3
++//     bug + boss-bar gating; +0x6A0 read is removed from the analytics path
++//     but kept in wire format for backward compat at value=0)
++//   - adds REGION_MODULE_BAG_MEMBER (id 9): wide scan of module_bag[0..0x100]
++//     at 8-byte stride, capturing 512B body of every valid pointer. Up to 16
++//     modules per focused enemy. This is the v6.3 hypothesis for finding the
++//     enemy anim_id — it lives on a module we haven't enumerated.
++//   - schema stays at v2 (only additive region IDs, no header layout change)
+ #define PROBE_SCHEMA_VERSION 2u
+ 
+ // Buffer pool sized per spec §buffer pool sizing (rev4):
+@@ -107,6 +115,14 @@ static constexpr size_t REGION_CAP_ACTION_REQUEST   = 0x200;   //  512 — Actio
+ static constexpr size_t REGION_CAP_TIME_ACT_CHILD_BODY = 0x200; // 512 — first 3 TimeAct child bodies (wider than 0x100 child scan)
+ static constexpr int    TIME_ACT_CHILD_BODY_MAX     = 3;       // cap deep-body children per entity (instrumentation)
+ 
++// v6.3 instrumentation regions (research 007 follow-up): module-bag-wide scan
++// to find where the enemy anim_id actually lives. Module bag is ~256 bytes of
++// pointer table at ChrIns+0x190; we capture the body of every valid pointer
++// in [0..0x100] at 8-byte stride.
++static constexpr size_t REGION_CAP_MODULE_BAG_MEMBER = 0x200;   //  512 — module body
++static constexpr int    MODULE_BAG_MEMBER_SCAN_BYTES = 0x100;   //  256 bytes of bag head scanned
++static constexpr int    MODULE_BAG_MEMBER_MAX        = 16;      //  cap modules captured per focused enemy
++
+ // Region IDs (spec §Region-relative offsets rev3):
+ enum RegionId : uint8_t {
+     REGION_CHR_INS_ROOT          = 0,
+@@ -119,6 +135,8 @@ enum RegionId : uint8_t {
+     REGION_PHYS_MODULE           = 6,   // ChrPhysicsModule body (world pos leaf)
+     REGION_ACTION_REQUEST        = 7,   // ActionRequest module body (enemy anim_id alt path)
+     REGION_TIME_ACT_CHILD_BODY   = 8,   // first 3 TimeActChild bodies (deeper capture)
++    // v6.3 instrumentation (research 007 follow-up):
++    REGION_MODULE_BAG_MEMBER     = 9,   // body of any valid pointer in module bag head [0..0x100]
+ };
+ 
+ // Capture modes (spec §Modes):
+@@ -1621,6 +1639,37 @@ static uint8_t WriteTier3ForEnemy(Writer& w,
+         }
+     }
+ 
++    // v6.3 Region 9: module_bag_member — scan ChrModuleBag head [0..0x100]
++    // at 8-byte stride, capture 512B body of every valid pointer. This is
++    // the catch-all for finding where the enemy anim_id actually lives,
++    // since paths A/B/C through TimeAct + ActionRequest were all dead in
++    // the v6.2 capture. source_chain offset tells the analyzer which bag
++    // slot each captured body came from. No dedupe vs regions 1/2/6/7 — a
++    // bag member that's also captured as REGION_TIME_ACT_MODULE etc. is
++    // intentionally captured TWICE so the analyzer has one canonical
++    // "what's in the bag" sweep + the existing tailored regions for the
++    // modules we already understand. Cap MODULE_BAG_MEMBER_MAX = 16 well
++    // exceeds the expected ~10 populated slots in the bag head.
++    if (s.module_bag) {
++        int memberN = 0;
++        for (int off = 0; off < MODULE_BAG_MEMBER_SCAN_BYTES &&
++                          memberN < MODULE_BAG_MEMBER_MAX; off += 8) {
++            uintptr_t target = 0;
++            if (!SafeRead<uintptr_t>(s.module_bag + off, &target)) continue;
++            if ((target & 0x7) != 0) continue;
++            if (!LooksLikeUserPtrFast(target)) continue;
++            if (WriteRegionRecord(w, REGION_MODULE_BAG_MEMBER,
++                                  target, 9u,
++                                  0, REGION_CAP_MODULE_BAG_MEMBER,
++                                  true, (uint16_t)off)) {
++                ++count;
++                ++memberN;
++            } else {
++                return count;  // writer full
++            }
++        }
++    }
++
+     return count;
+ }
+ 
+@@ -1926,6 +1975,18 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+     // 8 bytes pad to 48-byte block (8+12+8+8+4 = 40; need 8 more)
+     w.put_u64(0);                       // 8 bytes reserved for future
+ 
++    // v6.3: derive an EFFECTIVE lock-on handle for analytics + focus-selection.
++    // Research 007 proved +0x6A0 is dead (1 distinct value, 0 transitions in
++    // 8,773 samples) while +0x6B0 tracks reality (17 transitions correlating
++    // with intentional lock-on toggles). Prefer +0x6B0 when valid; fall back
++    // to +0x6A0 (with a sentinel check) only as belt-and-braces in case the
++    // +0x6B0 read returns wild data on some future game state we haven't
++    // observed.
++    uint64_t playerLockHandleEffective = 0xFFFFFFFFFFFFFFFFull;
++    if (playerLockHandleNew != 0xFFFFFFFFFFFFFFFFull && playerLockHandleNew != 0) {
++        playerLockHandleEffective = playerLockHandleNew;
++    }
++
+     // ----- Boss-bar handles -----
+     uint64_t bossHandles[3] = {
+         0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull
+@@ -1995,7 +2056,8 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+             for (int b = 0; b < 3; ++b) {
+                 if (bossHandles[b] != 0xFFFFFFFFFFFFFFFFull && bossHandles[b] != 0) ++prioWanted;
+             }
+-            if (playerLockHandle != 0xFFFFFFFFFFFFFFFFull && playerLockHandle != 0) ++prioWanted;
++            // v6.3: use +0x6B0 (effective) for analytics; +0x6A0 was confirmed dead.
++            if (playerLockHandleEffective != 0xFFFFFFFFFFFFFFFFull && playerLockHandleEffective != 0) ++prioWanted;
+ 
+             int prioFound = 0;
+             for (int i = 0; i < count && prioFound < prioWanted && nWork < WORK_CAP; ++i) {
+@@ -2019,7 +2081,7 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+                 for (int b = 0; b < 3; ++b) {
+                     if (bossHandles[b] == h) { isPrio = true; inBoss = true; break; }
+                 }
+-                if (h == playerLockHandle && playerLockHandle != 0xFFFFFFFFFFFFFFFFull) {
++                if (h == playerLockHandleEffective && playerLockHandleEffective != 0xFFFFFFFFFFFFFFFFull) {
+                     isPrio = true; isLock = true;
+                 }
+                 if (!isPrio) continue;
+@@ -2097,9 +2159,9 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+     // Choose focused-enemy by spec priority:
+     //   1. lock-on  2. boss-bar slot 0  3. qualification: nearest  4. none
+     int focusedWorkIdx = -1;
+-    if (playerLockHandle != 0xFFFFFFFFFFFFFFFFull && playerLockHandle != 0) {
++    if (playerLockHandleEffective != 0xFFFFFFFFFFFFFFFFull && playerLockHandleEffective != 0) {
+         for (int i = 0; i < nWork; ++i) {
+-            if (work[i].handle == playerLockHandle) {
++            if (work[i].handle == playerLockHandleEffective) {
+                 focusedWorkIdx = i;
+                 focusReason = FOCUS_LOCK_ON;
+                 break;
+diff --git a/tools/analyze_v62_capture.py b/tools/analyze_v62_capture.py
+index 72ac50f..b75bf1b 100644
+--- a/tools/analyze_v62_capture.py
++++ b/tools/analyze_v62_capture.py
+@@ -325,18 +325,23 @@ def q2_anim_id(
+     read_idx_vals = [e.read_idx for _, e in focused_rows]
+     read_idx_counter = Counter(read_idx_vals)
+ 
+-    # Byte-level scans in regions 6/7/8.
+-    hit_counts: Counter[tuple[str, int, int, int]] = Counter()
+-    hit_examples: dict[tuple[str, int, int, int], tuple[int, int, int, str]] = {}
++    # Byte-level scans in regions 6/7/8/9. v6.3: region 9 (module_bag_member)
++    # was added so the analyzer covers the wide module-bag sweep. Hit keys
++    # include source_chain (= module-bag offset for region 9, time_act head
++    # offset for regions 4/8) so hits from different module-bag slots don't
++    # collapse into a single false signal.
++    hit_counts: Counter[tuple[str, int, int, int, int]] = Counter()
++    hit_examples: dict[tuple[str, int, int, int, int], tuple[int, int, int, str]] = {}
+     rows_with_any_hit = 0
+     rows_region_presence: Counter[int] = Counter()
+ 
+     for s, e in focused_rows:
+         row_hit = False
+         for r in e.regions:
+-            if r.region_id not in (6, 7, 8):
++            if r.region_id not in (6, 7, 8, 9):
+                 continue
+             rows_region_presence[r.region_id] += 1
++            src_chain = r.source_chain  # bag/timeact offset for grouped hits
+             payload = r.payload
+             for off in range(0, len(payload) - 3, 4):
+                 b = payload[off : off + 4]
+@@ -345,22 +350,22 @@ def q2_anim_id(
+                 u16lo = struct.unpack_from("<H", b, 0)[0]
+                 u16hi = struct.unpack_from("<H", b, 2)[0]
+                 if u32le in anim_targets:
+-                    k = ("u32le", r.region_id, off, u32le)
++                    k = ("u32le", r.region_id, src_chain, off, u32le)
+                     hit_counts[k] += 1
+                     row_hit = True
+                     hit_examples.setdefault(k, (s.ts_ms_rel, e.handle, r.region_base_abs, b.hex()))
+                 if u32be in anim_targets:
+-                    k = ("u32be", r.region_id, off, u32be)
++                    k = ("u32be", r.region_id, src_chain, off, u32be)
+                     hit_counts[k] += 1
+                     row_hit = True
+                     hit_examples.setdefault(k, (s.ts_ms_rel, e.handle, r.region_base_abs, b.hex()))
+                 if u16lo in anim_targets:
+-                    k = ("u16lo", r.region_id, off, u16lo)
++                    k = ("u16lo", r.region_id, src_chain, off, u16lo)
+                     hit_counts[k] += 1
+                     row_hit = True
+                     hit_examples.setdefault(k, (s.ts_ms_rel, e.handle, r.region_base_abs, b.hex()))
+                 if u16hi in anim_targets:
+-                    k = ("u16hi", r.region_id, off + 2, u16hi)
++                    k = ("u16hi", r.region_id, src_chain, off + 2, u16hi)
+                     hit_counts[k] += 1
+                     row_hit = True
+                     hit_examples.setdefault(k, (s.ts_ms_rel, e.handle, r.region_base_abs, b.hex()))
+@@ -411,8 +416,9 @@ def q2_anim_id(
+             {
+                 "kind": k[0],
+                 "region_id": k[1],
+-                "offset": k[2],
+-                "value": k[3],
++                "source_chain": k[2],   # bag offset (region 9) or time_act head offset (regions 4/8)
++                "offset": k[3],         # offset within the captured 512B body
++                "value": k[4],
+                 "count": c,
+                 "pct_rows": pct(c, len(focused_rows)),
+                 "example_ts_ms_rel": ex[0],
+@@ -455,9 +461,18 @@ def q2_anim_id(
+             rationale="Path C produced matching anim IDs with temporal transitions.",
+         )
+     elif best_u32 and best_u32[1] >= max(100, int(0.05 * len(focused_rows))):
+-        (kind, rid, off, _value), count = best_u32
++        (kind, rid, src_chain, off, _value), count = best_u32
++        # For region 9 (module_bag_member) the src_chain is the bag offset of
++        # the captured module — report it so the winner is unambiguous about
++        # WHICH module the anim_id lives on.
++        if rid == 9:
++            location = f"region=9(bag+0x{src_chain:X}),offset=0x{off:X}"
++        elif rid in (4, 8):
++            location = f"region={rid}(time_act+0x{src_chain:X}),offset=0x{off:X}"
++        else:
++            location = f"region={rid},offset=0x{off:X}"
+         verdict = Verdict(
+-            winner=f"fixture-scan-find(region={rid},offset=0x{off:X})",
++            winner=f"fixture-scan-find({location})",
+             confidence="medium",
+             key_number=f"best {kind} hit count={count}/{len(focused_rows)}",
+             rationale="Consistent aligned scan hit suggests a plausible field offset.",
+@@ -766,15 +781,24 @@ def render_report(
+ 
+     lines.append(
+         f"- region presence counts (focused rows): "
+-        f"R6 `{q2['rows_region_presence'].get(6,0)}`, R7 `{q2['rows_region_presence'].get(7,0)}`, R8 `{q2['rows_region_presence'].get(8,0)}`"
++        f"R6 `{q2['rows_region_presence'].get(6,0)}`, R7 `{q2['rows_region_presence'].get(7,0)}`, "
++        f"R8 `{q2['rows_region_presence'].get(8,0)}`, R9 `{q2['rows_region_presence'].get(9,0)}`"
+     )
+     lines.append(f"- rows with any scan hit (u32/u16/u32-be): `{q2['rows_with_any_hit']}/{focused_count}`")
+ 
+     u32_hits = [h for h in q2["top_hits"] if h["kind"].startswith("u32")]
+     lines.append(f"- u32-aligned hits total keys: `{len(u32_hits)}` (top below)")
+     for h in u32_hits[:10]:
++        # For region 9 the source_chain is the module-bag offset; for regions
++        # 4/8 it's the time_act head offset. Render so the bag slot is visible.
++        if h["region_id"] == 9:
++            loc = f"R9(bag+0x{h['source_chain']:X})+0x{h['offset']:X}"
++        elif h["region_id"] in (4, 8):
++            loc = f"R{h['region_id']}(time_act+0x{h['source_chain']:X})+0x{h['offset']:X}"
++        else:
++            loc = f"R{h['region_id']}+0x{h['offset']:X}"
+         lines.append(
+-            f"  - {h['kind']} R{h['region_id']}+0x{h['offset']:X} = `{h['value']}` "
++            f"  - {h['kind']} {loc} = `{h['value']}` "
+             f"count `{h['count']}` ({h['pct_rows']:.4f}% rows), example bytes `{h['example_bytes']}`"
+         )
+ 
+diff --git a/tools/probe_bin.py b/tools/probe_bin.py
+index 495cf9d..67ddb65 100644
+--- a/tools/probe_bin.py
++++ b/tools/probe_bin.py
+@@ -46,6 +46,8 @@ REGION_NAMES = {
+     6: "phys_module_body",
+     7: "action_request_body",
+     8: "time_act_child_body",
++    # v6.3 instrumentation regions (schema still v2; additive):
++    9: "module_bag_member",
+ }
+ 
+ CAPTURE_MODE_NAMES = {1: "smoke", 2: "qualification", 3: "discovery"}

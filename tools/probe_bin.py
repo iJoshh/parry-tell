@@ -46,6 +46,8 @@ REGION_NAMES = {
     6: "phys_module_body",
     7: "action_request_body",
     8: "time_act_child_body",
+    # v6.3 instrumentation regions (schema still v2; additive):
+    9: "module_bag_member",
 }
 
 CAPTURE_MODE_NAMES = {1: "smoke", 2: "qualification", 3: "discovery"}

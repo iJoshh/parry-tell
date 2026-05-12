@@ -325,18 +325,23 @@ def q2_anim_id(
     read_idx_vals = [e.read_idx for _, e in focused_rows]
     read_idx_counter = Counter(read_idx_vals)
 
-    # Byte-level scans in regions 6/7/8.
-    hit_counts: Counter[tuple[str, int, int, int]] = Counter()
-    hit_examples: dict[tuple[str, int, int, int], tuple[int, int, int, str]] = {}
+    # Byte-level scans in regions 6/7/8/9. v6.3: region 9 (module_bag_member)
+    # was added so the analyzer covers the wide module-bag sweep. Hit keys
+    # include source_chain (= module-bag offset for region 9, time_act head
+    # offset for regions 4/8) so hits from different module-bag slots don't
+    # collapse into a single false signal.
+    hit_counts: Counter[tuple[str, int, int, int, int]] = Counter()
+    hit_examples: dict[tuple[str, int, int, int, int], tuple[int, int, int, str]] = {}
     rows_with_any_hit = 0
     rows_region_presence: Counter[int] = Counter()
 
     for s, e in focused_rows:
         row_hit = False
         for r in e.regions:
-            if r.region_id not in (6, 7, 8):
+            if r.region_id not in (6, 7, 8, 9):
                 continue
             rows_region_presence[r.region_id] += 1
+            src_chain = r.source_chain  # bag/timeact offset for grouped hits
             payload = r.payload
             for off in range(0, len(payload) - 3, 4):
                 b = payload[off : off + 4]
@@ -345,22 +350,22 @@ def q2_anim_id(
                 u16lo = struct.unpack_from("<H", b, 0)[0]
                 u16hi = struct.unpack_from("<H", b, 2)[0]
                 if u32le in anim_targets:
-                    k = ("u32le", r.region_id, off, u32le)
+                    k = ("u32le", r.region_id, src_chain, off, u32le)
                     hit_counts[k] += 1
                     row_hit = True
                     hit_examples.setdefault(k, (s.ts_ms_rel, e.handle, r.region_base_abs, b.hex()))
                 if u32be in anim_targets:
-                    k = ("u32be", r.region_id, off, u32be)
+                    k = ("u32be", r.region_id, src_chain, off, u32be)
                     hit_counts[k] += 1
                     row_hit = True
                     hit_examples.setdefault(k, (s.ts_ms_rel, e.handle, r.region_base_abs, b.hex()))
                 if u16lo in anim_targets:
-                    k = ("u16lo", r.region_id, off, u16lo)
+                    k = ("u16lo", r.region_id, src_chain, off, u16lo)
                     hit_counts[k] += 1
                     row_hit = True
                     hit_examples.setdefault(k, (s.ts_ms_rel, e.handle, r.region_base_abs, b.hex()))
                 if u16hi in anim_targets:
-                    k = ("u16hi", r.region_id, off + 2, u16hi)
+                    k = ("u16hi", r.region_id, src_chain, off + 2, u16hi)
                     hit_counts[k] += 1
                     row_hit = True
                     hit_examples.setdefault(k, (s.ts_ms_rel, e.handle, r.region_base_abs, b.hex()))
@@ -411,8 +416,9 @@ def q2_anim_id(
             {
                 "kind": k[0],
                 "region_id": k[1],
-                "offset": k[2],
-                "value": k[3],
+                "source_chain": k[2],   # bag offset (region 9) or time_act head offset (regions 4/8)
+                "offset": k[3],         # offset within the captured 512B body
+                "value": k[4],
                 "count": c,
                 "pct_rows": pct(c, len(focused_rows)),
                 "example_ts_ms_rel": ex[0],
@@ -455,9 +461,18 @@ def q2_anim_id(
             rationale="Path C produced matching anim IDs with temporal transitions.",
         )
     elif best_u32 and best_u32[1] >= max(100, int(0.05 * len(focused_rows))):
-        (kind, rid, off, _value), count = best_u32
+        (kind, rid, src_chain, off, _value), count = best_u32
+        # For region 9 (module_bag_member) the src_chain is the bag offset of
+        # the captured module — report it so the winner is unambiguous about
+        # WHICH module the anim_id lives on.
+        if rid == 9:
+            location = f"region=9(bag+0x{src_chain:X}),offset=0x{off:X}"
+        elif rid in (4, 8):
+            location = f"region={rid}(time_act+0x{src_chain:X}),offset=0x{off:X}"
+        else:
+            location = f"region={rid},offset=0x{off:X}"
         verdict = Verdict(
-            winner=f"fixture-scan-find(region={rid},offset=0x{off:X})",
+            winner=f"fixture-scan-find({location})",
             confidence="medium",
             key_number=f"best {kind} hit count={count}/{len(focused_rows)}",
             rationale="Consistent aligned scan hit suggests a plausible field offset.",
@@ -766,15 +781,24 @@ def render_report(
 
     lines.append(
         f"- region presence counts (focused rows): "
-        f"R6 `{q2['rows_region_presence'].get(6,0)}`, R7 `{q2['rows_region_presence'].get(7,0)}`, R8 `{q2['rows_region_presence'].get(8,0)}`"
+        f"R6 `{q2['rows_region_presence'].get(6,0)}`, R7 `{q2['rows_region_presence'].get(7,0)}`, "
+        f"R8 `{q2['rows_region_presence'].get(8,0)}`, R9 `{q2['rows_region_presence'].get(9,0)}`"
     )
     lines.append(f"- rows with any scan hit (u32/u16/u32-be): `{q2['rows_with_any_hit']}/{focused_count}`")
 
     u32_hits = [h for h in q2["top_hits"] if h["kind"].startswith("u32")]
     lines.append(f"- u32-aligned hits total keys: `{len(u32_hits)}` (top below)")
     for h in u32_hits[:10]:
+        # For region 9 the source_chain is the module-bag offset; for regions
+        # 4/8 it's the time_act head offset. Render so the bag slot is visible.
+        if h["region_id"] == 9:
+            loc = f"R9(bag+0x{h['source_chain']:X})+0x{h['offset']:X}"
+        elif h["region_id"] in (4, 8):
+            loc = f"R{h['region_id']}(time_act+0x{h['source_chain']:X})+0x{h['offset']:X}"
+        else:
+            loc = f"R{h['region_id']}+0x{h['offset']:X}"
         lines.append(
-            f"  - {h['kind']} R{h['region_id']}+0x{h['offset']:X} = `{h['value']}` "
+            f"  - {h['kind']} {loc} = `{h['value']}` "
             f"count `{h['count']}` ({h['pct_rows']:.4f}% rows), example bytes `{h['example_bytes']}`"
         )
 
