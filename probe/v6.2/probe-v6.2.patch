@@ -1,5 +1,5 @@
 diff --git a/probe/probe.cpp b/probe/probe.cpp
-index 4c58628..3cf1723 100644
+index 4c58628..1d238d3 100644
 --- a/probe/probe.cpp
 +++ b/probe/probe.cpp
 @@ -72,8 +72,12 @@
@@ -168,7 +168,7 @@ index 4c58628..3cf1723 100644
          }
      }
  
-@@ -1496,6 +1573,49 @@ static uint8_t WriteTier3ForEnemy(Writer& w,
+@@ -1496,6 +1573,54 @@ static uint8_t WriteTier3ForEnemy(Writer& w,
          else return count;
      }
  
@@ -191,13 +191,18 @@ index 4c58628..3cf1723 100644
 +        else return count;
 +    }
 +
-+    // Region 8: time_act_child_body — first TIME_ACT_CHILD_BODY_MAX children
-+    // captured at REGION_CAP_TIME_ACT_CHILD_BODY (512B) instead of 256B.
-+    // Goal: deeper capture of the children that the 256B scan suggests hold
-+    // the active anim state.
++    // Region 8: time_act_child_body — DIFFERENT children than Region 4, at
++    // deeper 512B body. Region 4 scans offsets [0, 0x800) and takes the first
++    // TIME_ACT_CHILD_MAX (8) valid pointers; Region 8 scans the SECOND HALF
++    // of the same span [0x400, 0x800) so Region 4 and Region 8 never overlap
++    // in source_chain. Goal: widen the captured surface of the TimeAct head
++    // pointer table — if the real active-anim child is at e.g. offset 0x408,
++    // Region 4's 8-children cap can miss it but Region 8 will pick it up.
++    // (Codex deep-review P1 #2: prevent silent under-capture.)
 +    if (s.time_act) {
++        constexpr int R8_SCAN_START = TIME_ACT_CHILD_SCAN_BYTES / 2;  // 0x400
 +        int childN = 0;
-+        for (int off = 0; off < TIME_ACT_CHILD_SCAN_BYTES &&
++        for (int off = R8_SCAN_START; off < TIME_ACT_CHILD_SCAN_BYTES &&
 +                          childN < TIME_ACT_CHILD_BODY_MAX; off += 8) {
 +            uintptr_t target = 0;
 +            if (!SafeRead<uintptr_t>(s.time_act + off, &target)) continue;
@@ -218,7 +223,7 @@ index 4c58628..3cf1723 100644
      return count;
  }
  
-@@ -1510,8 +1630,8 @@ static bool WriteEnemyRecord(Writer& w,
+@@ -1510,8 +1635,8 @@ static bool WriteEnemyRecord(Writer& w,
                               bool include_focus_emphasis,
                               bool drop_broad_sweep)
  {
@@ -229,7 +234,7 @@ index 4c58628..3cf1723 100644
      if (w.pos + ENEMY_HEADER_BYTES > w.cap) { w.overflow = true; return false; }
  
      size_t startMark = w.pos;
-@@ -1538,11 +1658,32 @@ static bool WriteEnemyRecord(Writer& w,
+@@ -1538,11 +1663,42 @@ static bool WriteEnemyRecord(Writer& w,
      size_t regionCountMark = w.pos;
      w.put_u8(0);   // region_count_for_this_enemy — patched below
      w.put_u8(0);   // reserved
@@ -263,10 +268,20 @@ index 4c58628..3cf1723 100644
 +    constexpr size_t WRITTEN = WRITTEN_LEGACY + WRITTEN_V62;
      constexpr size_t PAD = ENEMY_HEADER_BYTES - WRITTEN;
 +    static_assert(PAD == 20, "v6.2 enemy header pad math drifted");
++    // v6.2 reserved-byte contract (the 20 PAD bytes at end of EnemyHeader):
++    //   bytes 0..7   reserved for v6.3 anim_id_path_d (u32) + reserved (u32)
++    //                  — placeholder if a fourth anim source surfaces
++    //   bytes 8..15  reserved for v6.3 lock_on_legacy_chr_target (u64)
++    //                  — only if v6.2 capture reveals enemies need their own
++    //                    lock-on/threat field captured per-row
++    //   bytes 16..19 reserved for v6.3 extra flags (u32)
++    // Future evolutions should consume contiguously from byte 0 of the pad
++    // and document any new claim with a static_assert that the consumed
++    // bytes <= 20. Schema MUST bump if any pad byte is repurposed.
      if (w.pos + PAD > w.cap) { w.overflow = true; w.pos = startMark; return false; }
      memset(w.buf + w.pos, 0, PAD);
      w.pos += PAD;
-@@ -1680,6 +1821,13 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+@@ -1680,6 +1836,13 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
          for (int i = 0; i < 4; ++i) w.put_f32(0.0f);
          for (int i = 0; i < 3; ++i) w.put_f32(0.0f);
          w.put_u64(0xFFFFFFFFFFFFFFFFull);
@@ -280,7 +295,7 @@ index 4c58628..3cf1723 100644
          for (int i = 0; i < 3; ++i) w.put_u64(0xFFFFFFFFFFFFFFFFull);
          w.put_u64(0);                            // focused_handle
          w.put_u8((uint8_t)FOCUS_NONE);
-@@ -1709,6 +1857,12 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+@@ -1709,6 +1872,12 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
      float playerAnimTime[4] = {0,0,0,0};
      float playerPos[3] = {0,0,0};
      uint64_t playerLockHandle = 0xFFFFFFFFFFFFFFFFull;
@@ -293,7 +308,7 @@ index 4c58628..3cf1723 100644
  
      if (playerChrIns) {
          // Walk module bag → TimeAct
-@@ -1724,17 +1878,38 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
+@@ -1724,17 +1893,38 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
                  SafeRead<float>(ta + Off::TIME_ACT_TIME_CAND_2, &playerAnimTime[2]);
                  SafeRead<float>(ta + Off::TIME_ACT_TIME_CAND_3, &playerAnimTime[3]);
              }
@@ -332,7 +347,27 @@ index 4c58628..3cf1723 100644
  
      // ----- Boss-bar handles -----
      uint64_t bossHandles[3] = {
-@@ -2478,6 +2653,10 @@ static bool ParseHeader(Reader& r, ParsedHeader* h) {
+@@ -2229,13 +2419,18 @@ static bool OpenSessionFiles() {
+         return false;
+     }
+     // CSV header
++    // v6.2: enemy rows append 8 instrumentation columns at end. Sample rows
++    // unchanged. Positional CSV consumers must accept the new tail columns.
+     fprintf(g_csvFile,
+         "kind,sample_seq,ts_ms_rel,mode,focused_handle,focus_reason,"
+         "enemy_record_count,truncated,adaptive_step,sample_bytes,"
+         "enemy_idx,enemy_chr_ins,enemy_handle,"
+         "field_38,field_60,field_64,field_68,field_6C,field_80,field_1E8,"
+         "anim_id,t0,t1,t2,t3,in_lock_on,in_boss_bar,in_roster,class,"
+-        "is_focused,focus_reason_e,region_count\n");
++        "is_focused,focus_reason_e,region_count,"
++        // v6.2 enemy instrumentation tail (only populated on E rows; S rows blank):
++        "anim_id_path_b,read_idx,anim_id_path_c,action_request_abs,phys_module_abs,"
++        "phys_pos_x,phys_pos_y,phys_pos_z\n");
+     BootLog("session_open: %s.{bin,csv,log.txt}", g_sessionTagPath);
+     return true;
+ }
+@@ -2478,6 +2673,10 @@ static bool ParseHeader(Reader& r, ParsedHeader* h) {
      for (int i = 0; i < 4; ++i) h->player_anim_time[i] = r.get_f32();
      for (int i = 0; i < 3; ++i) h->player_pos[i]       = r.get_f32();
      h->player_lock_handle = r.get_u64();
@@ -343,7 +378,39 @@ index 4c58628..3cf1723 100644
      for (int i = 0; i < 3; ++i) h->boss_handles[i]     = r.get_u64();
      h->focused_handle     = r.get_u64();
      h->focus_reason       = r.get_u8();
-@@ -2509,8 +2688,8 @@ static void EmitCsvSampleRow(uint64_t seq, const ParsedHeader& h, size_t sample_
+@@ -2491,13 +2690,26 @@ static bool ParseHeader(Reader& r, ParsedHeader* h) {
+ 
+ static void EmitCsvSampleRow(uint64_t seq, const ParsedHeader& h, size_t sample_bytes) {
+     if (!g_csvFile) return;
++    // S row: 40 columns total to match header. Section 1 (kind..sample_bytes) =
++    // 10 values; remaining 30 cells empty.
++    //   3 blanks: enemy_idx, enemy_chr_ins, enemy_handle
++    //   7 blanks: field_38, field_60, field_64, field_68, field_6C, field_80, field_1E8
++    //   5 blanks: anim_id, t0, t1, t2, t3
++    //   4 blanks: in_lock_on, in_boss_bar, in_roster, class
++    //   3 blanks: is_focused, focus_reason_e, region_count
++    //   8 blanks: anim_id_path_b, read_idx, anim_id_path_c, action_request_abs, phys_module_abs, phys_pos_x, phys_pos_y, phys_pos_z
++    //  30 total blanks → 29 commas between them + 1 trailing newline.
++    // After the `,` at end of `%zu,`, the literal needs exactly 29 more commas + \n.
+     fprintf(g_csvFile,
+         "S,%llu,%llu,%u,0x%016llX,%u,%u,%u,%u,%zu,"
+-        ",,,"           // enemy_idx, chr_ins, handle blanks
+-        ",,,,,,,,"     // field_* blanks
+-        ",,,,,"         // anim_id, t0..t3 blanks
+-        ",,,,"          // in_lock_on, in_boss_bar, in_roster, class blanks
+-        ",,\n",         // is_focused, focus_reason_e, region_count blanks
++        ",,"                       // 2 commas → enemy_idx + enemy_chr_ins blanks (3 cells total with leading comma)
++        ","                        // 1 → enemy_handle blank (now 3 cells)
++        ",,,,,,,"                  // 7 → field_* (10 cells)
++        ",,,,,"                    // 5 → anim_id..t3 (15 cells)
++        ",,,,"                     // 4 → in_lock_on..class (19 cells)
++        ",,,"                      // 3 → is_focused..region_count (22 cells)
++        ",,,,,,,"                  // 7 → 7 of 8 v6.2 tail (29 cells)
++        "\n",                      // 1 newline closes the 30th cell (last v6.2 blank)
+         (unsigned long long)seq,
+         (unsigned long long)h.ts_ms_rel,
+         (unsigned)h.mode,
+@@ -2509,8 +2721,8 @@ static void EmitCsvSampleRow(uint64_t seq, const ParsedHeader& h, size_t sample_
          sample_bytes);
  }
  
@@ -354,7 +421,7 @@ index 4c58628..3cf1723 100644
      uint64_t chrIns = r.get_u64();
      uint64_t handle = r.get_u64();
      uint32_t f38    = r.get_u32();
-@@ -2530,7 +2709,22 @@ static void EmitCsvEnemyRow(uint64_t seq, int enemy_idx, Reader& r) {
+@@ -2530,7 +2742,22 @@ static void EmitCsvEnemyRow(uint64_t seq, int enemy_idx, Reader& r) {
      uint8_t fReas  = r.get_u8();
      uint8_t regCnt = r.get_u8();
      (void)r.get_u8();    // reserved
@@ -378,7 +445,7 @@ index 4c58628..3cf1723 100644
      if (!r.ok) return;
  
      if (g_csvFile) {
-@@ -2539,13 +2733,17 @@ static void EmitCsvEnemyRow(uint64_t seq, int enemy_idx, Reader& r) {
+@@ -2539,13 +2766,17 @@ static void EmitCsvEnemyRow(uint64_t seq, int enemy_idx, Reader& r) {
              "%d,0x%016llX,0x%016llX,"
              "0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,"
              "0x%08X,%.6f,%.6f,%.6f,%.6f,"
@@ -398,7 +465,7 @@ index 4c58628..3cf1723 100644
      }
  
      // Skip Tier 3 records for this enemy. Each region record:
-@@ -2856,7 +3054,7 @@ static DWORD WINAPI WorkerMain(LPVOID) {
+@@ -2856,7 +3087,7 @@ static DWORD WINAPI WorkerMain(LPVOID) {
                  }
  
                  for (int e = 0; e < hdr.enemy_record_count && r.ok; ++e) {
@@ -408,10 +475,21 @@ index 4c58628..3cf1723 100644
              }
  
 diff --git a/tools/probe_bin.py b/tools/probe_bin.py
-index 4e2a8c8..061476b 100644
+index 4e2a8c8..495cf9d 100644
 --- a/tools/probe_bin.py
 +++ b/tools/probe_bin.py
-@@ -130,6 +130,13 @@ class EnemyRecord:
+@@ -42,6 +42,10 @@ REGION_NAMES = {
+     3: "time_act_focus",
+     4: "time_act_child",
+     5: "ai_struct",
++    # v6.2 instrumentation regions (schema v2):
++    6: "phys_module_body",
++    7: "action_request_body",
++    8: "time_act_child_body",
+ }
+ 
+ CAPTURE_MODE_NAMES = {1: "smoke", 2: "qualification", 3: "discovery"}
+@@ -130,6 +134,13 @@ class EnemyRecord:
      focus_reason: int
      region_count: int
      regions: list[RegionRecord] = field(default_factory=list)
@@ -425,7 +503,7 @@ index 4e2a8c8..061476b 100644
  
      @property
      def class_name(self) -> str:
-@@ -156,6 +163,12 @@ class Sample:
+@@ -156,6 +167,12 @@ class Sample:
      enemy_record_count: int
      adaptive_step: int
      enemies: list[EnemyRecord] = field(default_factory=list)
@@ -438,7 +516,7 @@ index 4e2a8c8..061476b 100644
  
  
  # ---------------------------------------------------------------------------
-@@ -239,6 +252,19 @@ def _parse_sample(payload: bytes) -> Sample:
+@@ -239,6 +256,19 @@ def _parse_sample(payload: bytes) -> Sample:
      player_anim_time = (cur.f32(), cur.f32(), cur.f32(), cur.f32())
      player_pos = (cur.f32(), cur.f32(), cur.f32())
      player_lock = cur.u64()
@@ -458,7 +536,7 @@ index 4e2a8c8..061476b 100644
      boss = (cur.u64(), cur.u64(), cur.u64())
      focused = cur.u64()
      focus_reason = cur.u8()
-@@ -264,6 +290,11 @@ def _parse_sample(payload: bytes) -> Sample:
+@@ -264,6 +294,11 @@ def _parse_sample(payload: bytes) -> Sample:
          focus_reason=focus_reason,
          enemy_record_count=enemy_count,
          adaptive_step=adaptive_step,
@@ -470,7 +548,7 @@ index 4e2a8c8..061476b 100644
      )
  
      # 2026-05-11: the probe (v6.0 and v6.1) has a count-vs-payload mismatch
-@@ -278,7 +309,7 @@ def _parse_sample(payload: bytes) -> Sample:
+@@ -278,7 +313,7 @@ def _parse_sample(payload: bytes) -> Sample:
          if cur.pos >= len(cur.buf):
              break
          try:
@@ -479,7 +557,7 @@ index 4e2a8c8..061476b 100644
          except ParseError:
              # Partial enemy record (probe truncated mid-write). Stop here;
              # caller can inspect sample.enemy_record_count vs len(enemies) to
-@@ -287,7 +318,7 @@ def _parse_sample(payload: bytes) -> Sample:
+@@ -287,7 +322,7 @@ def _parse_sample(payload: bytes) -> Sample:
      return sample
  
  
@@ -488,7 +566,7 @@ index 4e2a8c8..061476b 100644
      chr_ins = cur.u64()
      handle = cur.u64()
      f038 = cur.u32()
-@@ -307,7 +338,26 @@ def _parse_enemy(cur: _Cursor) -> EnemyRecord:
+@@ -307,7 +342,26 @@ def _parse_enemy(cur: _Cursor) -> EnemyRecord:
      foc_reason = cur.u8()
      reg_count = cur.u8()
      cur.u8()  # reserved
@@ -516,7 +594,7 @@ index 4e2a8c8..061476b 100644
  
      enemy = EnemyRecord(
          chr_ins_abs=chr_ins,
-@@ -328,6 +378,12 @@ def _parse_enemy(cur: _Cursor) -> EnemyRecord:
+@@ -328,6 +382,12 @@ def _parse_enemy(cur: _Cursor) -> EnemyRecord:
          is_focused=is_foc,
          focus_reason=foc_reason,
          region_count=reg_count,

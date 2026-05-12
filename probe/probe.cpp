@@ -1592,13 +1592,18 @@ static uint8_t WriteTier3ForEnemy(Writer& w,
         else return count;
     }
 
-    // Region 8: time_act_child_body — first TIME_ACT_CHILD_BODY_MAX children
-    // captured at REGION_CAP_TIME_ACT_CHILD_BODY (512B) instead of 256B.
-    // Goal: deeper capture of the children that the 256B scan suggests hold
-    // the active anim state.
+    // Region 8: time_act_child_body — DIFFERENT children than Region 4, at
+    // deeper 512B body. Region 4 scans offsets [0, 0x800) and takes the first
+    // TIME_ACT_CHILD_MAX (8) valid pointers; Region 8 scans the SECOND HALF
+    // of the same span [0x400, 0x800) so Region 4 and Region 8 never overlap
+    // in source_chain. Goal: widen the captured surface of the TimeAct head
+    // pointer table — if the real active-anim child is at e.g. offset 0x408,
+    // Region 4's 8-children cap can miss it but Region 8 will pick it up.
+    // (Codex deep-review P1 #2: prevent silent under-capture.)
     if (s.time_act) {
+        constexpr int R8_SCAN_START = TIME_ACT_CHILD_SCAN_BYTES / 2;  // 0x400
         int childN = 0;
-        for (int off = 0; off < TIME_ACT_CHILD_SCAN_BYTES &&
+        for (int off = R8_SCAN_START; off < TIME_ACT_CHILD_SCAN_BYTES &&
                           childN < TIME_ACT_CHILD_BODY_MAX; off += 8) {
             uintptr_t target = 0;
             if (!SafeRead<uintptr_t>(s.time_act + off, &target)) continue;
@@ -1684,6 +1689,16 @@ static bool WriteEnemyRecord(Writer& w,
     constexpr size_t WRITTEN = WRITTEN_LEGACY + WRITTEN_V62;
     constexpr size_t PAD = ENEMY_HEADER_BYTES - WRITTEN;
     static_assert(PAD == 20, "v6.2 enemy header pad math drifted");
+    // v6.2 reserved-byte contract (the 20 PAD bytes at end of EnemyHeader):
+    //   bytes 0..7   reserved for v6.3 anim_id_path_d (u32) + reserved (u32)
+    //                  — placeholder if a fourth anim source surfaces
+    //   bytes 8..15  reserved for v6.3 lock_on_legacy_chr_target (u64)
+    //                  — only if v6.2 capture reveals enemies need their own
+    //                    lock-on/threat field captured per-row
+    //   bytes 16..19 reserved for v6.3 extra flags (u32)
+    // Future evolutions should consume contiguously from byte 0 of the pad
+    // and document any new claim with a static_assert that the consumed
+    // bytes <= 20. Schema MUST bump if any pad byte is repurposed.
     if (w.pos + PAD > w.cap) { w.overflow = true; w.pos = startMark; return false; }
     memset(w.buf + w.pos, 0, PAD);
     w.pos += PAD;
@@ -2404,13 +2419,18 @@ static bool OpenSessionFiles() {
         return false;
     }
     // CSV header
+    // v6.2: enemy rows append 8 instrumentation columns at end. Sample rows
+    // unchanged. Positional CSV consumers must accept the new tail columns.
     fprintf(g_csvFile,
         "kind,sample_seq,ts_ms_rel,mode,focused_handle,focus_reason,"
         "enemy_record_count,truncated,adaptive_step,sample_bytes,"
         "enemy_idx,enemy_chr_ins,enemy_handle,"
         "field_38,field_60,field_64,field_68,field_6C,field_80,field_1E8,"
         "anim_id,t0,t1,t2,t3,in_lock_on,in_boss_bar,in_roster,class,"
-        "is_focused,focus_reason_e,region_count\n");
+        "is_focused,focus_reason_e,region_count,"
+        // v6.2 enemy instrumentation tail (only populated on E rows; S rows blank):
+        "anim_id_path_b,read_idx,anim_id_path_c,action_request_abs,phys_module_abs,"
+        "phys_pos_x,phys_pos_y,phys_pos_z\n");
     BootLog("session_open: %s.{bin,csv,log.txt}", g_sessionTagPath);
     return true;
 }
@@ -2670,13 +2690,26 @@ static bool ParseHeader(Reader& r, ParsedHeader* h) {
 
 static void EmitCsvSampleRow(uint64_t seq, const ParsedHeader& h, size_t sample_bytes) {
     if (!g_csvFile) return;
+    // S row: 40 columns total to match header. Section 1 (kind..sample_bytes) =
+    // 10 values; remaining 30 cells empty.
+    //   3 blanks: enemy_idx, enemy_chr_ins, enemy_handle
+    //   7 blanks: field_38, field_60, field_64, field_68, field_6C, field_80, field_1E8
+    //   5 blanks: anim_id, t0, t1, t2, t3
+    //   4 blanks: in_lock_on, in_boss_bar, in_roster, class
+    //   3 blanks: is_focused, focus_reason_e, region_count
+    //   8 blanks: anim_id_path_b, read_idx, anim_id_path_c, action_request_abs, phys_module_abs, phys_pos_x, phys_pos_y, phys_pos_z
+    //  30 total blanks → 29 commas between them + 1 trailing newline.
+    // After the `,` at end of `%zu,`, the literal needs exactly 29 more commas + \n.
     fprintf(g_csvFile,
         "S,%llu,%llu,%u,0x%016llX,%u,%u,%u,%u,%zu,"
-        ",,,"           // enemy_idx, chr_ins, handle blanks
-        ",,,,,,,,"     // field_* blanks
-        ",,,,,"         // anim_id, t0..t3 blanks
-        ",,,,"          // in_lock_on, in_boss_bar, in_roster, class blanks
-        ",,\n",         // is_focused, focus_reason_e, region_count blanks
+        ",,"                       // 2 commas → enemy_idx + enemy_chr_ins blanks (3 cells total with leading comma)
+        ","                        // 1 → enemy_handle blank (now 3 cells)
+        ",,,,,,,"                  // 7 → field_* (10 cells)
+        ",,,,,"                    // 5 → anim_id..t3 (15 cells)
+        ",,,,"                     // 4 → in_lock_on..class (19 cells)
+        ",,,"                      // 3 → is_focused..region_count (22 cells)
+        ",,,,,,,"                  // 7 → 7 of 8 v6.2 tail (29 cells)
+        "\n",                      // 1 newline closes the 30th cell (last v6.2 blank)
         (unsigned long long)seq,
         (unsigned long long)h.ts_ms_rel,
         (unsigned)h.mode,
