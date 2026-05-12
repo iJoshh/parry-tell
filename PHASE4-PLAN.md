@@ -405,22 +405,55 @@ for each poll:
     if target_filter_enabled:
       read target-of-attention
       require target == local player
-    if audio_cue_enabled and a window opens within reaction budget:
-      fire one cue and log the decision
+    if audio_cue_enabled and lead_time_ms <= audio_cue_lead_ms and not latched:
+      fire one cue, latch, log the decision
 ```
 
 Lead-time math:
 
 - `lead_time_s = window_open_s - current_anim_time_s`
 - `lead_time_ms = lead_time_s * 1000.0`
-- Cue when `0 <= lead_time_ms <= audio_cue_reaction_budget_ms`.
-- Default reaction budget: `250 ms`. This budget intentionally absorbs the
-  end-to-end audio path latency (`PlaySoundW` async kickoff plus OS mixer)
-  which is typically 10-30 ms on Windows. The plan does NOT subtract a
-  separate `audio_latency_estimate_ms`; that would make the math harder to
-  reason about and the regression harness easier to fool. If live tuning
-  shows the cue arrives consistently late by N ms, raise the reaction budget
-  by N ms rather than introducing a separate latency knob.
+- Cue is configured by a target lead-time `audio_cue_lead_ms`, NOT a one-sided
+  reaction budget. Default: `0 ms` (fire exactly at window-open). Range:
+  `-200..500` ms. Positive values fire BEFORE the window opens; zero fires
+  AT the window-open frame; negative values fire AFTER the window opens (for
+  users who want a confirmation tone rather than a prediction cue).
+- Fire when `lead_time_ms <= audio_cue_lead_ms` AND the cue has not yet been
+  latched for this `(boss_handle, window_id)`. Once fired, latch the
+  `(boss_handle, anim_id, window_open_s)` triple. The latch is cleared ONLY
+  by the Phase 4.1 reset rules below (anim_id change, anim_time rewind
+  greater than `50 ms` tolerance, handle disappearance, c-id change). Small
+  sub-tolerance rewinds DO NOT clear the latch — this prevents duplicate cues
+  when a positive-lead cue has already fired and anim_time then jitters
+  backward by a few milliseconds. This produces ONE cue per window, at the
+  precise offset Josh chooses, not "anywhere within a 250ms band".
+- Negative-lead handling: if `audio_cue_lead_ms < 0`, the cue can only fire
+  once `current_anim_time_s >= window_open_s + (-audio_cue_lead_ms / 1000)`.
+  Still subject to the "before window_close" guard. If the target fire-time
+  `window_open_s + (-audio_cue_lead_ms / 1000) > window_close_s`, the cue is
+  suppressed entirely for that window and logged with
+  `suppressed_reason="negative_lead_exceeds_window"`. Example: `audio_cue_lead_ms = -150`
+  on a 100ms window means the cue would fire 50ms after window-close;
+  suppress.
+- Polling jitter: the predictor polls every `prediction_poll_interval_ms`
+  (default 4 ms). The predicate `lead_time_ms <= audio_cue_lead_ms` fires on
+  the FIRST poll after the threshold is crossed, so jitter is one-sided:
+  actual cue lands in the range `[audio_cue_lead_ms - poll_ms, audio_cue_lead_ms]`.
+  Concretely, with `audio_cue_lead_ms = 0` and `poll_ms = 4`, the actual lead
+  at fire time is in `[-4ms, 0ms]` — the cue is always at-or-just-after the
+  target offset, never before it. This matches Josh's expectation: setting
+  `audio_cue_lead_ms = 10` means "fire at most 10ms before the window, never
+  earlier than that." Tuning the poll interval down to 1ms tightens the
+  range; tuning up to 8ms loosens it.
+- Windows audio latency (`PlaySoundW` async kickoff + OS mixer, typically
+  10-30 ms) is NOT subtracted from the cue calculation. Josh tunes
+  `audio_cue_lead_ms` against the observed end-to-end timing, not a
+  theoretical engine time. If the cue feels 20 ms late at `audio_cue_lead_ms=0`,
+  Josh raises the knob to `20`. The plan deliberately exposes the single
+  tunable knob rather than splitting it into "engine lead" + "audio latency
+  estimate" which would multiply the configuration surface for no user gain.
+- The window-close guard remains: if `current_anim_time_s > window_close_s`,
+  no cue, regardless of lead config. A missed window is a missed window.
 - If the current sample is already inside the window
   (`window_open_s <= anim_time <= window_close_s`), allow a cue only if that
   window has not been latched and the late arrival is within a small tolerance
@@ -450,10 +483,22 @@ Latch and reset semantics:
     for `500 ms`.
 - If the engine cancels an animation before the window opens, no cue should
   fire. The reset on anim change handles this.
-- If the target changes from not-Josh to Josh during the reaction-budget
-  interval, cue if the window is still upcoming or just-opened within the late
-  tolerance. This matches the Phase 1 state machine's mid-attack target switch
-  behavior for the audio portion.
+- Target-switch-to-Josh handling has three cases:
+  1. **Switch happens BEFORE threshold crossed** (`lead_time_ms > audio_cue_lead_ms`):
+     cue normally when lead crosses the threshold. No tag.
+  2. **Switch happens AFTER threshold crossed but BEFORE window opens**
+     (`0 < lead_time_ms <= audio_cue_lead_ms`): fire immediately. The cue
+     would have fired earlier had the target been Josh. Tag
+     `late_target_switch=true` in the decision log. This case only applies
+     when `audio_cue_lead_ms > 0`.
+  3. **Switch happens AFTER window opens but BEFORE it closes**
+     (`window_open_s <= current_anim_time_s <= window_close_s`): fire
+     immediately. The window is still parry-able. Tag
+     `late_target_switch=true` AND `inside_window=true`.
+  4. **Switch happens AFTER window closes**: do not fire. Window already
+     missed. Tag suppression with `suppressed_reason="target_switch_post_window"`.
+  This matches the Phase 1 state machine's mid-attack target switch behavior
+  for the audio portion.
 - If the target changes from Josh to not-Josh before cue time, suppress the
   cue and log `suppressed_target=false`.
 
@@ -598,7 +643,8 @@ Playback wrapper:
 ### Risks + Mitigations
 
 - Risk: `PlaySoundW` has higher latency than expected.
-  Mitigation: keep the WAV short and preloaded; tune `audio_cue_reaction_budget_ms`.
+  Mitigation: keep the WAV short and preloaded; tune `audio_cue_lead_ms` to
+  compensate for observed end-to-end latency.
 - Risk: Memory-buffer playback behaves differently across Windows versions.
   Mitigation: test on Josh's station; fallback to resource or filename mode if
   needed, while keeping the same wrapper API.
@@ -636,7 +682,7 @@ session_name = parry-tell
 
 [audio]
 audio_cue_enabled = true
-audio_cue_reaction_budget_ms = 250
+audio_cue_lead_ms = 0
 audio_cue_wav_path =
 
 [prediction]
@@ -665,7 +711,7 @@ Knobs:
 | Key | Default | Valid range | Controls | When to change |
 |---|---:|---|---|---|
 | `audio_cue_enabled` | `true` | bool | Master switch for parry-window cue playback. Prediction and logging can still run when false. | Turn off for silent regression captures or if audio is distracting. |
-| `audio_cue_reaction_budget_ms` | `250` | `0..1000` | How early before `window_open_s` the cue may fire. | Lower if cues feel early; raise if human reaction needs more lead. |
+| `audio_cue_lead_ms` | `0` | `-200..500` | Target offset from `window_open_s` at which to fire the cue. Positive = before, zero = exactly at, negative = after. Cue is latched once per window. Negative values larger than a given window's duration suppress that window entirely (target fire-time would be past window-close). | Tune to taste: try `0` (fire at window-open) first; raise to `10`/`50`/`100` if the cue feels late against observed parries; go negative for confirmation-tone mode (be aware short windows may suppress). |
 | `audio_cue_wav_path` | empty | existing file, <= 1 MB | Optional custom WAV loaded at startup. Empty uses embedded resource. | Use when Josh wants a different tone or volume. |
 | `target_filter_enabled` | `true` after Gate 0.B, otherwise `false` | bool | Requires boss target-of-attention to be local player before cueing. | Turn off to compare MVP-audio-only behavior or if target field is suspect. |
 | `prediction_poll_interval_ms` | `4` | `1..33` | Sleep interval between predictor reads. | Lower for latency experiments; raise if CPU/log pressure appears. |
@@ -710,7 +756,7 @@ Notes:
 
 - Risk: Too many knobs confuse the first release.
   Mitigation: keep defaults correct; Josh should only need to edit WAV path or
-  reaction budget.
+  `audio_cue_lead_ms`.
 - Risk: Existing parser silently ignores typoed keys.
   Mitigation: add verbose unknown-key warnings for `[audio]` and
   `[prediction]`.
@@ -765,8 +811,8 @@ Decision log format:
   - anim_id
   - anim_time_s
   - window_open_s / window_close_s
-  - lead_time_ms
-  - reaction_budget_ms
+  - lead_time_ms (actual lead at cue-fire time)
+  - configured_lead_ms (the INI `audio_cue_lead_ms` value in effect)
   - target_filter_enabled
   - target_is_local_player
   - target raw value
@@ -779,8 +825,9 @@ Add `tools/verify_predictions.py`:
   - `.bin` capture path, including rotated shards
   - `.predictions.jsonl`
   - `data/parry_data.json`
-  - optional `--reaction-budget-ms`
-  - optional `--tolerance-ms`, default `50`
+  - optional `--lead-ms` (override what the predictor used, for replay analysis)
+  - optional `--tolerance-ms`, default `50` (how close actual lead must be to
+    configured lead to count as on-target)
 - It should reuse or share code with:
   - `tools/probe_bin.py`
   - `tools/qualify_oracle.py` DB loader and family fallback
@@ -790,10 +837,20 @@ Add `tools/verify_predictions.py`:
   3. Use the qualified anim_time slot `+0x24`, or assert the capture agrees.
   4. Build expected cue opportunities for every observed parry window:
      - same `(resolved_cid, anim_id)` exists in DB
-     - anim_time crosses `window_open - reaction_budget`
+     - anim_time crosses `window_open_s - (configured_lead_ms / 1000)`
      - window is not already consumed in same animation instance
+     - the target fire-time is BEFORE `window_close_s` (i.e., for negative
+       `configured_lead_ms`, the fire-time `window_open_s - configured_lead_ms/1000`
+       must satisfy `< window_close_s`; otherwise the window has no expected
+       cue opportunity and the verifier expects suppression with
+       `negative_lead_exceeds_window`)
   5. Match `cue_fired` decisions to expected opportunities within
-     `+/-50 ms` of predicted lead-time.
+     `+/-tolerance_ms` of `configured_lead_ms`. "On-target" means the actual
+     `lead_time_ms` at fire time was within tolerance of the configured value
+     (e.g., configured=50, actual=43, tolerance=50 → on-target). The
+     `--tolerance-ms` value MUST be at least `prediction_poll_interval_ms +
+     16ms` to account for one-sided polling jitter plus logging/timestamp
+     uncertainty; the verifier should warn if a smaller tolerance is supplied.
   6. Count false positives:
      - cue fired for anim_id with no parry windows in DB
      - cue fired after the window closed
