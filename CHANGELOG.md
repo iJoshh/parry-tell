@@ -1,3 +1,42 @@
+## 2026-05-11 (evening, second session-close) — qualify_oracle end-to-end PASS; launch-monitor tooling; Bundle A plan decision
+
+### Fixed
+- `tools/qualify_oracle.py::find_join_key` — DB family-fallback and junk-cid
+  filter shipped in commit `b269d7f` (see earlier entry today). Qualification
+  PASS confirmed on real combat footage: `qualification-20260511-195759`
+  (12,467 samples, 144 s Godrick Soldier fight), join key `field_at_0x064 =
+  4311 → c4310` via family fallback, anim_time `+0x24` (1760 forward
+  progressions), 5/8 windows matched within ±11 ms (62.5% vs 60% threshold).
+  **First end-to-end PASS on real combat footage.**
+- `tools/qualify_oracle.py::find_anim_time_field` — duration-slot rejection
+  shipped in commit `b739a82` (see earlier entry today). PASS verdict now
+  correctly selects `+0x24` over `+0x2C` on the live capture.
+
+### Added
+- `tools/launch-monitor.ps1` — NEW. ETW kernel-process trace + 500 ms process
+  snapshot loop + auto-extract DLL load timeline via `tracerpt`. Deployed to
+  `C:\Projects\elden-ring\launch-monitor.ps1` on station. A/B test (probe
+  enabled vs disabled) showed 4–5 min launch WITHOUT probe, confirming probe
+  is not the cause of Josh's reported 6-minute launches. DebugView capture
+  revealed a 222.5 s silent gap between early init events and first audio
+  activity — likely EOS init / EAC stub / DRM check / asset preload. Not
+  blocking; tracked for future investigation.
+
+### Fixed (launch-monitor.ps1 pre-deploy)
+- `$LastEldenEnd` not latched — eldenring_exit branch would emit every 500 ms
+  and prematurely auto-stop. Fixed before deploy.
+- CSV row builder used naive comma-join without quoting — embedded commas /
+  quotes / newlines could corrupt the CSV. Fixed before deploy.
+- Em-dash characters in the .ps1 source broke Windows PowerShell 5.1 parsing.
+  Replaced all em-dashes with `--`; saved as UTF-8-with-BOM.
+
+### Decision
+- **Bundle A ship strategy locked.** MVP audio + L1 target filter will ship
+  together as `v0.1.0` (skipping the separate MVP-only ship). L2 hue overlay
+  deferred to Bundle B after real-play feedback. Risk #1 (data pipeline) is
+  fully eliminated by tonight's PASS; risks #2 (D3D12 hook) and #3
+  (target-of-boss field) still exist and will be addressed in PHASE4-PLAN.md.
+
 ## 2026-05-11 (evening, post-session-close) — qualify_oracle anim_time duration-slot rejection
 
 ### Fixed

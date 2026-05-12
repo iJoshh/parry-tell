@@ -641,3 +641,38 @@ Test matrix (from PHASE1-PLAN, with CEO-review additions):
 - `ActionRequestModule + 0x90` (Erd-Tools path) for enemy anim_id: sentinel in both v6.2 and v6.3.
 - Module-bag-wide brute-force for c4380 anim IDs: v6.3 found only stable structural fields, not anim_id.
 - Path A "TimeAct + 0xD0" tentatively concluded WRONG in research-006/v6.2 — that conclusion was wrong; v6.2 sample was stationary. v6.3 confirmed path A is correct.
+
+### 2026-05-11 (second session) — qualify_oracle PASS on real combat; launch investigation; Bundle A decision
+
+**Accomplishments**
+
+1. **End-to-end qualification PASSED on real combat footage.** `qualification-20260511-195759` (12,467 samples, 144 s Godrick Soldier fight): join key `field_at_0x064 = 4311 → c4310` via family fallback, anim_time `+0x24` (1760 forward progressions), 5/8 windows matched within ±11 ms (62.5% vs 60% threshold). First PASS on real data. Data pipeline risk fully eliminated.
+
+2. **DB family-fallback shipped** (`qualify_oracle.py`, commit `b269d7f`). Captured c-ids without their own DB row fall back to the parent family entry (round-down-to-nearest-10). 262/281 c-ids are family-keyed; 19 unique-entity exceptions take exact-match precedence. `matched_via_family_fallback` flag added for honest reporting. Junk-cid filter also added: candidates with value < 1000 skipped; candidates resolving to a parry-less row skipped.
+
+3. **Duration-slot rejection shipped** (`qualify_oracle.py`, commit `b739a82`). Gate now requires `forward_progressions >= 50` AND ranks by `forward_progressions` instead of `max_segment_dur`. Discriminator is two orders of magnitude wide on real data: `+0x24` = 1292 progressions, `+0x2C` = 20.
+
+4. **Test fixture upgraded.** `test_qualify_oracle.py` now populates `+0x2C` with realistic duration decoys; new `test_family_fallback_lookup` covers 5 cases (exact, family fallback, exact-takes-precedence, absent, already-multiple-of-10-but-absent). New assertion locks winner at `+0x24`.
+
+5. **Launch investigation.** `tools/launch-monitor.ps1` built and deployed to station. A/B test ruled out probe as cause of 6-minute launches. DebugView revealed 222.5 s silent gap in game startup — likely EOS/EAC/DRM. Not blocking; tracked for future investigation.
+
+6. **Bundle A plan decision.** MVP audio + L1 target filter ship together as `v0.1.0`. L2 hue overlay deferred to Bundle B after real-play feedback. PHASE4-PLAN.md to be written next session.
+
+**Current state**
+
+- `qualify_oracle.py` produces PASSED verdicts on real combat captures.
+- All tests green: `test_qualify_oracle.py`, `test_probe_bin.py`, `test_calibrate_smoke.py`.
+- Probe v6.4 re-enabled at `/mnt/station-mods/parry-tell-probe.dll`.
+- 22 commits unpushed on `main`; session-close tag pending.
+
+**Next steps (priority order)**
+
+1. Plan-mode with Codex MCP to write PHASE4-PLAN.md for Bundle A (audio cue + target-of-boss filter, `v0.1.0`).
+2. Dispatch Bundle A implementation (~2 work sessions).
+3. After Bundle A survives a few co-op sessions, plan Bundle B (L2 hue overlay).
+
+**Ruled out this session**
+
+- Original 7-field `find_join_key` scan with no value filter: silently matched player-skeleton `c0000` via `field_at_0x1E8 = 0`. Fixed with min-value-1000 + must-have-parry-windows filters.
+- `max_segment_dur` as primary anim_time tiebreak: let `+0x2C` duration slot win. Fixed with `forward_progressions` counter.
+- Default 4 MB ETW buffer in `launch-monitor.ps1`: fills during launch burst, drops image-load events past ~50 s of eldenring.exe activity. Future fix: larger buffer + rundown provider.
