@@ -52,6 +52,10 @@ REGION_NAMES = {
     10: "ai_bag_head",
     11: "ai_struct_head",
     12: "module_bag_head",
+    # v7.2 target-of-attention expanded coverage:
+    13: "ai_struct_mid",
+    14: "action_req_head",
+    15: "player_chr_ins",
 }
 
 CAPTURE_MODE_NAMES = {1: "smoke", 2: "qualification", 3: "discovery"}

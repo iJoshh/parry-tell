@@ -59,6 +59,14 @@ TARGET_REGION_IDS: set[int] = {
     10,  # ai_bag_head       -- surrounds the +0xC0 ai_struct slot
     12,  # module_bag_head   -- +0x38 ai, +0x50 talk, +0x58 event, +0x80 action_req
     5,   # ai_struct (legacy +0xE000..+0xF000 fallback)
+    # v7.2 expanded coverage:
+    13,  # ai_struct_mid     -- +0x1000..+0x4000 (broader target hunting)
+    14,  # action_req_head   -- ActionRequest module body
+    # NOTE: region 15 (player_chr_ins) is NOT scanned for target candidates
+    # — it's the PLAYER's struct, not the boss's. We exclude it from the
+    # boss target-of-attention scan so its contents don't pollute the
+    # ranking. A separate analyzer pass could use it to identify Josh's
+    # friendly summons' handles for noise-rejection in multi-target captures.
 }
 
 # Scan stride for u64 (handle/pointer) candidates and u32 (entity-id) candidates.
@@ -245,6 +253,9 @@ def run_analysis(base_path: Path) -> dict:
             )
             if has_v70:
                 has_v70_region_count += 1
+            # v7.2 region check: extra coverage regions present?
+            # (Not strictly needed for ranking logic, but useful in the
+            # report's diagnostic header.)
             scan_focused_enemy(enemy, sample, stats_u64, stats_u32)
 
     print(
@@ -362,12 +373,15 @@ def format_report(result: dict, top_n: int = 30) -> str:
     lines.append("")
     lines.append("## Region map")
     lines.append("")
-    lines.append("| Region ID | Name | Captured range |")
-    lines.append("|---:|---|---|")
-    lines.append("| 5  | ai_struct (legacy)  | ai_struct + 0xE000..0xF000 |")
-    lines.append("| 10 | ai_bag_head         | ai_bag    + 0x0000..0x0400 |")
-    lines.append("| 11 | ai_struct_head      | ai_struct + 0x0000..0x1000 |")
-    lines.append("| 12 | module_bag_head     | module_bag + 0x0000..0x0100 |")
+    lines.append("| Region ID | Name | Captured range | Probe version |")
+    lines.append("|---:|---|---|---|")
+    lines.append("| 5  | ai_struct (legacy)  | ai_struct + 0xE000..0xF000 | v6.x+ |")
+    lines.append("| 10 | ai_bag_head         | ai_bag    + 0x0000..0x0400 | v7.0+ |")
+    lines.append("| 11 | ai_struct_head      | ai_struct + 0x0000..0x1000 | v7.0+ |")
+    lines.append("| 12 | module_bag_head     | module_bag + 0x0000..0x0100 | v7.0+ |")
+    lines.append("| 13 | ai_struct_mid       | ai_struct + 0x1000..0x4000 | v7.2+ |")
+    lines.append("| 14 | action_req_head     | ActionRequest + 0x0000..0x0200 | v7.2+ |")
+    lines.append("| 15 | player_chr_ins      | player ChrIns + 0x0000..0x0800 (excluded from target scan) | v7.2+ |")
     lines.append("")
     lines.append(
         "Offsets shown below are STRUCT-RELATIVE (from the start of the "

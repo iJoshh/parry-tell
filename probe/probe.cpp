@@ -72,7 +72,21 @@
 // Constants
 // ===========================================================================
 
-#define PROBE_VERSION_STR "v7.1-target-scan"
+#define PROBE_VERSION_STR "v7.2-target-scan"
+// v7.2-target-scan (Phase 4.0 Gate 0.B expanded coverage, 2026-05-12):
+// Three new regions on focused enemies to widen the target-of-attention
+// search territory before another roundtrip:
+//   REGION_AI_STRUCT_MID  (13): ai_struct +0x1000..+0x4000 (12 KB mid-range)
+//   REGION_ACTION_REQ_HEAD (14): ActionRequest module +0x000..+0x200 (512 B)
+//   REGION_PLAYER_CHR_INS (15): player ChrIns +0x000..+0x800 (2 KB)
+// Region 15 is sample-scoped (one capture of the LOCAL player's ChrIns
+// body per sample) but emitted under the focused enemy's region list for
+// wire-format compatibility. The analyzer dispatches by region_id, so
+// the parsing path works unchanged.
+// Per-sample byte budget: ~17 KB (existing) + 14.5 KB (new) = ~32 KB;
+// MAX_SAMPLE_BYTES=256 KB. Comfortable. v7.1's player_handle in the sample
+// header is preserved.
+//
 // v7.1-target-scan (Phase 4.0 Gate 0.B follow-up, 2026-05-12):
 // v7.0 capture showed zero matches between captured AI-struct/AI-bag/module-bag
 // u64 slots and player_chr_ins, confirming the target field stores a
@@ -176,6 +190,18 @@ static constexpr int    MODULE_BAG_MEMBER_MAX        = 16;      //  cap modules 
 static constexpr size_t REGION_CAP_AI_BAG_HEAD       = 0x400;   // 1024 — first 0x400 of ai bag (covers +0xC0 ai_struct ptr + surrounding slots)
 static constexpr size_t REGION_CAP_AI_STRUCT_HEAD    = 0x1000;  // 4096 — first 0x1000 of ai struct (PRIMARY target territory per research plan)
 static constexpr size_t REGION_CAP_MODULE_BAG_HEAD   = 0x100;   //  256 — first 0x100 of module bag (covers +0x38 ai, +0x50 talk, +0x58 event, +0x80 action_req)
+// v7.2 target-of-attention expanded coverage (Phase 4.0 Gate 0.B continued):
+// After v7.0 confirmed pointer-equality scored 0% across all captured u64
+// slots, v7.1 added handle-shape equality. v7.2 widens the search territory
+// in case the target field lives outside the head regions:
+//   REGION_CAP_AI_STRUCT_MID   (13): ai_struct +0x1000..+0x4000 (12288 B)
+//   REGION_CAP_ACTION_REQ_HEAD (14): action_request +0x000..+0x200 (512 B)
+//   REGION_CAP_PLAYER_CHR_INS  (15): player ChrIns +0x000..+0x800 (2048 B)
+// Per-sample byte budget: existing focused-enemy footprint ~17 KB; +14.5 KB
+// new = ~32 KB; writer cap MAX_SAMPLE_BYTES=256 KB. Comfortable.
+static constexpr size_t REGION_CAP_AI_STRUCT_MID     = 0x3000;  // 12288 — ai_struct +0x1000..+0x4000 (mid-range)
+static constexpr size_t REGION_CAP_ACTION_REQ_HEAD   = 0x200;   //   512 — first 0x200 of ActionRequest module body
+static constexpr size_t REGION_CAP_PLAYER_CHR_INS    = 0x800;   //  2048 — player ChrIns first 0x800 (per-sample, ONCE per sample, not per enemy)
 
 // Region IDs (spec §Region-relative offsets rev3):
 enum RegionId : uint8_t {
@@ -195,6 +221,10 @@ enum RegionId : uint8_t {
     REGION_AI_BAG_HEAD           = 10,  // ai bag +0x000..+0x400 (1024 bytes)
     REGION_AI_STRUCT_HEAD        = 11,  // ai struct +0x000..+0x1000 (4096 bytes) PRIMARY
     REGION_MODULE_BAG_HEAD       = 12,  // module bag +0x000..+0x100 (256 bytes)
+    // v7.2 target-of-attention expanded coverage (Phase 4.0 Gate 0.B continued):
+    REGION_AI_STRUCT_MID         = 13,  // ai struct +0x1000..+0x4000 (12288 bytes)
+    REGION_ACTION_REQ_HEAD       = 14,  // ActionRequest module +0x000..+0x200 (512 bytes)
+    REGION_PLAYER_CHR_INS        = 15,  // player ChrIns +0x000..+0x800 (2048 bytes) — ONE per sample
 };
 
 // Capture modes (spec §Modes):
@@ -1578,7 +1608,8 @@ static bool EnemyReadTier2(uintptr_t chr_ins_abs, EnemySnapshot* s) {
 static uint8_t WriteTier3ForEnemy(Writer& w,
                                   const EnemySnapshot& s,
                                   bool include_focus_emphasis,
-                                  bool drop_broad_sweep)
+                                  bool drop_broad_sweep,
+                                  uintptr_t player_chr_ins_for_region15)
 {
     if (drop_broad_sweep) return 0;
     if (s.chr_ins_abs == 0) return 0;
@@ -1692,6 +1723,41 @@ static uint8_t WriteTier3ForEnemy(Writer& w,
                                   false, 0)) ++count;
             else return count;
         }
+        // v7.2 expanded territory:
+        // Region 13: ai_struct mid-range (+0x1000..+0x4000) — broader target
+        // hunting. struct_offset in the analyzer = payload_offset + scan_off,
+        // so a hit at scan_off=0x10 here resolves to ai_struct+0x1010.
+        if (s.ai_struct) {
+            if (WriteRegionRecord(w, REGION_AI_STRUCT_MID,
+                                  s.ai_struct, 13u,
+                                  0x1000, REGION_CAP_AI_STRUCT_MID,
+                                  false, 0)) ++count;
+            else return count;
+        }
+        // Region 14: ActionRequest module body head — known module that may
+        // own a target-of-attention field. ActionRequest pointer is already
+        // walked at probe.cpp:1556-1563 (path-C anim_id) and stashed in
+        // s.action_request.
+        if (s.action_request) {
+            if (WriteRegionRecord(w, REGION_ACTION_REQ_HEAD,
+                                  s.action_request, 14u,
+                                  0, REGION_CAP_ACTION_REQ_HEAD,
+                                  false, 0)) ++count;
+            else return count;
+        }
+        // Region 15: PLAYER ChrIns root (sample-scoped, emitted under the
+        // focused enemy's record for wire-format compatibility). Provides
+        // context for identifying handle-shaped neighbors of Josh's
+        // friendly summons / NPC allies. Threaded through the call signature
+        // because the player ChrIns is only resolved in the detour's outer
+        // scope (not on the per-enemy snapshot).
+        if (player_chr_ins_for_region15) {
+            if (WriteRegionRecord(w, REGION_PLAYER_CHR_INS,
+                                  player_chr_ins_for_region15, 15u,
+                                  0, REGION_CAP_PLAYER_CHR_INS,
+                                  false, 0)) ++count;
+            else return count;
+        }
     }
 
     return count;
@@ -1706,7 +1772,8 @@ static bool WriteEnemyRecord(Writer& w,
                              const EnemySnapshot& s,
                              bool include_tier3,
                              bool include_focus_emphasis,
-                             bool drop_broad_sweep)
+                             bool drop_broad_sweep,
+                             uintptr_t player_chr_ins_for_region15)
 {
     // Reserve EnemyHeader: 136 bytes in schema v2 (96 legacy + 40 v6.2 block).
     constexpr size_t ENEMY_HEADER_BYTES = 136;
@@ -1778,7 +1845,9 @@ static bool WriteEnemyRecord(Writer& w,
 
     // Tier 3 regions (if eligible).
     if (include_tier3) {
-        uint8_t rc = WriteTier3ForEnemy(w, s, include_focus_emphasis, drop_broad_sweep);
+        uint8_t rc = WriteTier3ForEnemy(w, s, include_focus_emphasis,
+                                        drop_broad_sweep,
+                                        player_chr_ins_for_region15);
         w.patch_u8(regionCountMark, rc);
     }
     return true;
@@ -2399,7 +2468,8 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
             !ShouldEmitLesserT12(fakeEs, tick)) {
             return false;      // skip silently — lesser Tier 1+2 at 10 Hz
         }
-        return WriteEnemyRecord(w, s, incTier3, incFocus32, drop_broad_sweep);
+        return WriteEnemyRecord(w, s, incTier3, incFocus32, drop_broad_sweep,
+                                playerChrIns);
     };
 
     // 1) Focused enemy.
@@ -2431,7 +2501,8 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
             // sample still has a row for this enemy.
             if (WriteEnemyRecord(w, snaps[i], /*include_tier3=*/false,
                                  /*include_focus_emphasis=*/false,
-                                 /*drop_broad_sweep=*/true)) {
+                                 /*drop_broad_sweep=*/true,
+                                 /*player_chr_ins_for_region15=*/0)) {
                 ++writtenEnemies;
                 g_dropBudgetSkip.fetch_add(1, std::memory_order_relaxed);
             }
@@ -2451,7 +2522,8 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
         if (softBudgetExceeded) {
             if (WriteEnemyRecord(w, snaps[i], /*include_tier3=*/false,
                                  /*include_focus_emphasis=*/false,
-                                 /*drop_broad_sweep=*/true)) {
+                                 /*drop_broad_sweep=*/true,
+                                 /*player_chr_ins_for_region15=*/0)) {
                 ++writtenEnemies;
                 g_dropBudgetSkip.fetch_add(1, std::memory_order_relaxed);
             }
