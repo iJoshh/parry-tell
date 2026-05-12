@@ -1,6 +1,61 @@
 # parry-tell-probe — HANDOFF
 
-**Last updated:** 2026-05-11 20:30 CDT (post-v6.3 capture analysis, pre-v6.4)
+**Last updated:** 2026-05-11 21:05 CDT (v6.4 production deployed for tonight's co-op session)
+
+## TONIGHT'S CO-OP SESSION — operating manual
+
+Probe v6.4 is deployed at `/mnt/station-mods/parry-tell-probe.dll`. The
+PowerShell tailer is at `claude@station:C:\Projects\elden-ring\probe-status.ps1`.
+
+### Josh's gameplay flow
+
+1. Optional: open a PowerShell window on the station box, run
+   `.\probe-status.ps1` (or `pwsh ./probe-status.ps1`). Shows ARMED/DISARMED
+   live. Audible F11 beeps are the primary feedback though, so the
+   tailer is just a visual confirm.
+2. Boot Elden Ring. Probe attaches automatically.
+3. Walk to first boss arena. Press **F11** → low double-beep = **ARMED**.
+4. Fight. Wipe as many times as you want — probe stays armed through
+   wipes. Each wipe is just more data in the same .bin.
+5. Boss dies. Press **F11** → long high beep = **DISARMED**.
+6. Tell Claude "done with <boss name>" (or text via DM).
+7. Walk to next boss. Repeat F11 → fight → F11 → tell Claude.
+
+### Claude-side flow per boss-done report
+
+```
+tools/archive_session.sh                  # archive all today's sessions
+tools/segment_by_f11.py captures/sessions/YYYYMMDD/qualification-YYYYMMDD-HHMMSS
+```
+
+The archiver pulls the .bin (and any rotated .bin.NNN shards), .csv,
+.log.txt locally. The segmenter produces a `<session>.segments.json`
+listing each F11 arm/disarm cycle with sample counts and dominant c-ids
+per segment.
+
+### Multi-boss in one .bin
+
+The probe opens its files ONCE per game session and keeps them open
+until game exit. F11 toggling doesn't open/close files — it just controls
+sample emission. So all the night's bosses end up in the SAME .bin file
+unless Josh restarts the game. The segmenter handles that — each F11
+arm/disarm pair becomes one segment.
+
+### Audio feedback reference
+
+- **ARMED** = two quick LOW beeps (660 Hz × 2 × 100 ms)
+- **DISARMED** = one long HIGH beep (1320 Hz × 400 ms)
+
+### What if probe goes wrong
+
+- If F11 produces no beep at all: probe didn't load. Check
+  `parry-tell-probe.boot.log` in the mods folder.
+- If beeps fire but no .bin produced: roster init failed AND fallback
+  failed. Check `.log.txt` for `F11: roster recheck FAILED`.
+- If Josh forgets to disarm before quitting: probe writes a final
+  "session terminating" record, .bin file closes cleanly. Last F11 arm
+  with no disarm pairs into a single open-interval segment in the
+  segmenter manifest.
 
 ## Where we are
 
