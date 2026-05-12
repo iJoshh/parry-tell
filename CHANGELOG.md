@@ -1,3 +1,90 @@
+## 2026-05-11 — Probe v6.4 production; research-006/007/008 + three offset questions resolved
+
+### Added
+- `probe/v6.2/` — instrumentation build (schema v2). 48-byte Tier 1 player
+  block (vtable, phys-chain world pos, `+0x6B0` lock-on candidate, `+0x6B4`
+  target area); 40-byte+pad enemy header (anim_id path B/C candidates,
+  action_request + phys_module absolute addresses). Three new region IDs:
+  REGION_PHYS_MODULE (6), REGION_ACTION_REQUEST (7),
+  REGION_TIME_ACT_CHILD_BODY (8). Codex deep-critic pre-deploy: caught and
+  fixed CSV header drift (P1), region 4/8 overlap (P1), 40-vs-44-byte comment
+  drift (P2).
+- `probe/v6.3/` — module-bag-wide instrumentation. REGION_MODULE_BAG_MEMBER (9)
+  wide-scans ChrModuleBag[0..0x100] at 8-byte stride, capturing 512B body of
+  every valid pointer. Switched `in_lock_on` derivation from dead `+0x6A0` to
+  `+0x6B0` via `playerLockHandleEffective` — fixed `focus_reason=3-always` bug
+  AND silently-broken boss-bar gating. Codex deep-critic caught: analyzer
+  scanned only regions 6/7/8 not 9 (P1), `source_chain` missing from hit-keys
+  causing bag-slot collisions (P1).
+- `probe/v6.4/` — production cleanup for tonight's multi-boss co-op session.
+  Drops instrumentation regions 6/7/8/9 (purpose done; region IDs reserved in
+  enum so v6.2/v6.3 captures stay parseable). Co-op safety: scans 8
+  WCM_PLAYER_ARRAY slots (4 base + 4 Seamless Coop extension) and excludes all
+  valid friendly `chr_ins` pointers from both priority-pass and fill-pass roster
+  sweeps. Audible F11 feedback via `Beep()`: ARMED = 660 Hz × 2 × 100 ms (low
+  double-tap); DISARMED = 1320 Hz × 1 × 400 ms (long high beep). All v6.2/v6.3
+  wire-format additions retained. Deployed to `/mnt/station-mods/`.
+- `tools/probe-status.ps1` — PowerShell tailer for the station Windows box.
+  Watches the latest `.log.txt`, prints ARMED/DISARMED transitions with
+  timestamps. Handles same-name file truncation and partial-line edge cases
+  (both caught by Codex deep-critic before deploy). Pushed to
+  `C:\Projects\elden-ring\probe-status.ps1`.
+- `tools/archive_session.sh` — copies session `.bin` (and all rotated
+  `.bin.NNN` shards), `.csv`, and `.log.txt` from SMB to
+  `captures/sessions/YYYYMMDD/`. Path-traversal-safe (session name regex),
+  atomic-rename via `.partial`. Codex caught: long sessions crossing 2 GB
+  would silently miss rotated shards without the glob pattern.
+- `tools/segment_by_f11.py` — parses `.bin` + `.log.txt` to produce per-F11-
+  cycle segment manifests. Translates between log-side ms (probe-init epoch)
+  and bin-side ms (session_start_ms epoch). Implicit close of arm-without-
+  disarm at next-arm timestamp. Uses `probe_bin.read_session` to handle rotated
+  bin shards. Codex caught: missing implicit-close would have eaten boss 2 data
+  if Josh forgot to disarm between bosses.
+- `tools/analyze_v62_capture.py` — research-007 analyzer for v6.2 captures;
+  extended in v6.3 for region 9 + `source_chain` hit-key deduplication.
+- `tools/scan_for_anim_ids.py` — research-006 brute-force byte scanner.
+- `captures/.gitignore` — keeps raw `.bin` files out of git; manifests,
+  `.log.txt`, and `segments.json` stay tracked.
+- `research/006-SYNTHESIS.md` — cross-vendor consensus from vswarte/eldenring-
+  rs, TGA Cheat Engine Table v1.17, Erd-Tools, TarnishedTool, and Mordrog
+  PostureBarMod on three ER 2.6.1 ChrIns offset questions.
+- `research/006-claude-deep-research.findings.jsonl`, `006-codex-research.md`,
+  `006-fixture-verification.md` — research-006 raw artifacts.
+- `research/007-v62-capture-analysis-codex.md` — v6.2 capture analysis:
+  8,773 focused rows of c4382 Godrick Knight at Stormveil Gatefront. Q1 and Q3
+  resolved; Q2 (enemy anim_id) was a dead end due to stationary-enemy sample.
+- `research/008-v63-capture-analysis-codex.md` — v6.3 capture analysis:
+  12,467 focused rows (~144 s). Q2 resolved: `TimeAct + 0xD0` (path A, the
+  original v6.1.1 offset) produces 9,265 nonzero anim_id reads with 89
+  transitions and clean anim_time monotonicity. v6.2 zero-reads were a
+  stationary-enemy artifact.
+- `probe/releases/parry-tell-probe-v6.{2,3,4}.dll` + `.tar.gz` — build
+  artifacts committed for audit trail.
+- `probe/v6.{2,3,4}/CHANGES.md` + `.patch` — per-version change records.
+- `captures/sessions/20260511/` — v6.3 capture archived with `segments.json`.
+
+### Changed
+- `probe/probe.cpp` — iterated v6.1.1 → v6.2 → v6.3 → v6.4 (see above).
+- `tools/probe_bin.py` — added schema-v2 parser support for v6.2 wire format;
+  v6.4 region name labels.
+- `HANDOFF.md` — rewritten with "TONIGHT'S CO-OP SESSION — operating manual"
+  at top: Josh's gameplay flow, Claude-side flow per boss-done report,
+  multi-boss-in-one-.bin explanation, audio feedback reference, and what-if
+  notes.
+
+### Resolved (research)
+Three ER 2.6.1 ChrIns offset questions closed with HIGH confidence:
+
+| Field | Path | Verdict |
+|---|---|---|
+| World position | `bag→+0x68→+0x70` (phys-chain) | v6.3 byte-verified |
+| Enemy active anim_id | `TimeAct + 0xD0` (path A, original v6.1.1) | 9,265 nonzero reads, 89 transitions |
+| Player lock-on target | `PlayerIns + 0x6B0` (FieldInsHandle u64) | 20 transitions vs 0 for `+0x6A0` |
+
+**The probe was never the bug.** Research-006's false alarm was caused by a
+stationary-enemy fixture sample in v6.2. v6.3 with an actively-fighting enemy
+confirmed the original offsets are correct.
+
 ## 2026-05-08 — Probe v6 built, staged, and analysis pipeline written
 
 ### Added

@@ -592,3 +592,52 @@ Test matrix (from PHASE1-PLAN, with CEO-review additions):
   resolution outside the roster — v5e debugging proved the function returns
   input unchanged when given a stack pointer; documented as known limitation.
 - Worker-side delta encoding in v6 — deferred to v6.1; not blocking.
+
+### 2026-05-11 — Probe v6.4 production; three offset questions resolved; co-op tooling shipped
+
+**Accomplishments**
+
+1. **Research-006 dispatched + completed.** Dual deep-research (Claude skill + Codex CLI) across five axes: vswarte/eldenring-rs, TGA Cheat Engine Table v1.17, Erd-Tools, TarnishedTool, Mordrog PostureBarMod. Investigated three ER 2.6.1 ChrIns offset bugs from v6.1.1: world position (`+0x6C0` noise), enemy anim_id (`TimeAct+0xD0` returning 0), player lock-on (`+0x6A0` pointer-shaped value). Synthesis written to `research/006-SYNTHESIS.md`.
+
+2. **Fixture verification refuted the vswarte anim_queue model.** Proposed `TimeActModule + 0x20 + read_idx*16` queue was all sentinels in the c4382 fixture bytes. Bundle-fix approach abandoned; instrumentation build commissioned instead.
+
+3. **Probe v6.2 instrumentation build.** Schema v2. 48-byte Tier 1 player block + 40-byte enemy header; three new region IDs (6/7/8). Codex deep-critic pre-deploy: CSV header drift (P1), region 4/8 overlap (P1), comment-vs-code drift (P2) — all fixed before capture.
+
+4. **Research-007 (v6.2 capture analysis).** 8,773 focused rows of c4382 Knight at Stormveil Gatefront. Q1 (world pos) → phys-chain wins. Q3 (lock-on) → `+0x6B0` wins (17 transitions vs 0 for `+0x6A0`). Q2 (enemy anim_id) → dead end; all three paths sentinel/zero — stationary-enemy artifact.
+
+5. **Probe v6.3 module-bag-wide instrumentation.** REGION_MODULE_BAG_MEMBER (9) wide-scans ChrModuleBag[0..0x100]. Switched `in_lock_on` to `+0x6B0` — fixed `focus_reason=3-always` bug AND silently-broken boss-bar gating.
+
+6. **Research-008 (v6.3 capture analysis) — Q2 SOLVED.** 12,467 focused rows, ~144 s, c4311 Godrick Soldier (74%) + c4382 Knight (10%). Path A (`TimeAct + 0xD0`) was always correct: 9,265 nonzero reads, 89 transitions, clean anim_time monotonicity. v6.2 zeros were a stationary-enemy artifact. **The probe was never the bug.**
+
+7. **Probe v6.4 production build** deployed to `/mnt/station-mods/`. Drops instrumentation regions 6/7/8/9. Co-op safety: 8 WCM_PLAYER_ARRAY slots scanned, all friendly `chr_ins` excluded from roster sweeps. Audible F11 feedback via `Beep()`. All v6.2/v6.3 wire-format additions retained.
+
+8. **Supporting tools shipped:** `tools/probe-status.ps1` (PowerShell tailer, deployed to station), `tools/archive_session.sh` (SMB → local archive with shard support), `tools/segment_by_f11.py` (per-F11-cycle segment manifests with epoch translation). All three had Codex deep-critic passes; P1 findings fixed before deploy.
+
+9. **HANDOFF.md** rewritten with full tonight-session operating manual at top.
+
+**Deep-critic gatekeeping summary**
+
+- v6.2: 3 findings (2 P1, 1 P2) — all fixed before capture session
+- v6.3: 2 findings (2 P1) — all fixed before capture session
+- v6.4 tooling: 3 findings (2 P1, 1 P2) — all fixed before deploy
+
+**Current state**
+
+- Probe v6.4 live at `/mnt/station-mods/parry-tell-probe.dll` (228 KB).
+- PowerShell tailer live at `C:\Projects\elden-ring\probe-status.ps1`.
+- Three offset questions resolved with HIGH confidence; probe is functionally correct for tonight's multi-boss co-op session.
+- 19 commits unpushed on `main`; session-close tag pending.
+
+**Next steps (priority order)**
+
+1. Tonight: Josh plays multi-boss co-op session; Claude archives + segments per boss-done report.
+2. Next session: implement DB join-key fuzzy mapping in `qualify_oracle.py` (`c4382` individual variant → `c4380` parent family). ~30-line Python change.
+3. Once join-key works: achieve qualification PASS on c2130 Banished Knight (79 parry windows) or c4380 Knight (53 windows).
+4. Build the actual parry-prediction analyzer.
+
+**Ruled out this session**
+
+- `TimeActModule + 0x20 + read_idx*16` (vswarte anim_queue) for enemy anim_id: refuted by v6.2 fixture (all sentinels), confirmed v6.3 (still sentinels — queue not used for AI-controlled enemies).
+- `ActionRequestModule + 0x90` (Erd-Tools path) for enemy anim_id: sentinel in both v6.2 and v6.3.
+- Module-bag-wide brute-force for c4380 anim IDs: v6.3 found only stable structural fields, not anim_id.
+- Path A "TimeAct + 0xD0" tentatively concluded WRONG in research-006/v6.2 — that conclusion was wrong; v6.2 sample was stationary. v6.3 confirmed path A is correct.

@@ -57,183 +57,176 @@ arm/disarm pair becomes one segment.
   with no disarm pairs into a single open-interval segment in the
   segmenter manifest.
 
-## Where we are
+---
 
-v6.3 capture (qualification-20260511-195759.bin, 144s armed, 12,467 focused
-rows of c4311 Godrick Soldier + c4382 Knight at Gatefront) resolved ALL
-THREE research-006 offset questions with HIGH confidence.
+## Where we left off
 
-**The probe was never the bug.** Research 006 was a false alarm caused by
-a stationary-enemy sample in v6.2. v6.3 with an actively-fighting enemy
-showed the original v6.1.1 offsets are correct.
+Probe v6.4 is deployed and ready for tonight's multi-boss co-op session.
+This session resolved all three ER 2.6.1 ChrIns offset questions that
+research-006 flagged as bugs — they were never bugs. The v6.2 capture
+used a stationary enemy; v6.3 with an actively-fighting enemy confirmed
+the original v6.1.1 offsets are correct.
 
-### Resolved offsets
+**The probe was never the bug.**
 
-| Field | Offset | Path | Source of truth |
-|---|---|---|---|
-| Enemy + player world pos | `bag→+0x68→+0x70` (Vector3) | phys-chain (TGA CT v1.17 + vswarte) | v6.3 byte-verified; player legacy `+0x6C0` also works but has chunk wraps |
-| Enemy active anim_id | `TimeAct + 0xD0` | path A (original v6.1.1) | v6.3 8,265 nonzero reads with 89 transitions for c4311; c4382 path_a values cleanly match c4380 anim list |
-| Enemy anim_time | `TimeAct + 0x24` AND `+0x28` | candidates 1+2 | v6.3 shows clean monotonic playback with ~16 resets on anim_id transitions, ~50 monotonic segments |
-| Player lock-on target | `PlayerIns + 0x6B0` (FieldInsHandle u64) | new in v6.3 | 20 transitions vs 0 for `+0x6A0`; FromSoft handle pattern `0x3C2A2500_NNNNNNNN`; player vtable RVA `0x02A7CB40` confirms PlayerIns subclass |
-| Player lock-on target area | `PlayerIns + 0x6B4` (u32) | new in v6.3 | Toggle-paired with `+0x6B0` |
+### Resolved offsets (HIGH confidence)
 
-### What v6.3 also fixed
+| Field | Offset / Path | Source of truth |
+|---|---|---|
+| Enemy + player world pos | `bag→+0x68→+0x70` (phys-chain, Vector3) | v6.3 byte-verified; player legacy `+0x6C0` also works but has chunk wraps |
+| Enemy active anim_id | `TimeAct + 0xD0` (path A, original v6.1.1) | v6.3: 9,265 nonzero reads, 89 transitions, clean anim_time monotonicity |
+| Enemy anim_time | `TimeAct + 0x24` AND `+0x28` | v6.3: clean monotonic playback, ~16 resets on anim_id transitions |
+| Player lock-on target | `PlayerIns + 0x6B0` (FieldInsHandle u64) | 20 transitions vs 0 for `+0x6A0`; FromSoft handle pattern confirmed |
+| Player lock-on target area | `PlayerIns + 0x6B4` (u32) | Toggle-paired with `+0x6B0` |
 
-- `in_lock_on` flag now fires correctly (it derived from the dead `+0x6A0`
-  in v6.1.1/v6.2). v6.3 introduced `playerLockHandleEffective` that prefers
-  `+0x6B0`. focus_reason=FOCUS_LOCK_ON (1) now fires in 74% of v6.3 samples,
+### What v6.3/v6.4 also fixed
+
+- `in_lock_on` flag now fires correctly (was derived from dead `+0x6A0` in
+  v6.1.1/v6.2). v6.3 introduced `playerLockHandleEffective` that prefers
+  `+0x6B0`. `focus_reason=FOCUS_LOCK_ON (1)` fires in 74% of v6.3 samples,
   was 0% in v6.2.
-- Boss-bar gating (was silently broken because boss-bar correlation gated
-  on `in_lock_on`).
+- Boss-bar gating (was silently broken because it gated on `in_lock_on`).
+- Co-op safety: v6.4 scans 8 WCM_PLAYER_ARRAY slots (4 base + 4 Seamless
+  Coop extension) and excludes all valid friendly `chr_ins` pointers from
+  both roster passes.
 
-## What's NOT resolved (not a probe problem)
+## Accomplishments this session
 
-These are analytical issues for v6.5+ work, NOT v6.4 blockers:
+1. **Research-006 dispatched + completed.** Dual deep-research (Claude skill +
+   Codex CLI) across five vendor sources. Three ER 2.6.1 ChrIns offset
+   questions investigated. Synthesis in `research/006-SYNTHESIS.md`.
 
-1. **DB join-key fuzzy mapping.** `field_at_0x064` captures the individual
-   c-id variant (e.g. c4382 Knight). `parry_data.json` is keyed by parent
-   c-id (e.g. c4380). `qualify_oracle.py` joins exact-match and silently
-   filters out variants. Needs a parent-family lookup
-   (`int(cid_str[:5]) → parent` or a per-c-id table).
-2. **Some fought enemies aren't in the parry DB.** c4311 (Godrick Soldier,
-   74% of v6.3 focused rows) is NOT in `parry_data.json` at all. The DB has
-   107 chars with parry windows out of 281 with anim data. Soldiers don't
-   appear to be parry-eligible per the extractor's rules. **Aim for known-DB
-   targets** (c2130 Banished Knights in Stormveil interior, c4380 Knights,
-   bosses).
+2. **Fixture verification refuted the vswarte anim_queue model** for c4382
+   Knight. Bundle-fix approach abandoned; instrumentation build commissioned.
 
-## v6.4 plan — production build for tonight's multi-boss session
+3. **Probe v6.2 instrumentation build.** Schema v2. 48-byte Tier 1 player
+   block + 40-byte enemy header; three new region IDs (6/7/8). Codex deep-
+   critic pre-deploy caught CSV header drift (P1), region 4/8 overlap (P1),
+   comment drift (P2) — all fixed.
 
-**Goals:**
-1. Drop the v6.2/v6.3 instrumentation regions that didn't pan out (6/7/8/9).
-   Keep schema_version at 2 so v6.2/v6.3 captures stay parseable.
-2. Keep ALL the resolved data emitting going forward — no regressions:
-   - Player Tier 1 v6.2 block (vtable, phys pos, phys module abs, +0x6B0
-     lock, +0x6B4 area, +reserved) — KEEP all 48 bytes
-   - Enemy header v6.2 block (anim_id_path_b/c, read_idx, action_request,
-     phys_module, world_pos_phys, +20 pad) — KEEP all 44 bytes + 20 pad
-3. **Co-op safety fix: exclude all friendly PCs from roster sweep.** Currently
-   v6.1.1's player-skip only excludes `playerChrIns` (the local player at
-   slot 0 of WCM_PLAYER_ARRAY). For Josh's tonight session with up to 5
-   co-op friends, all 4 slots of WCM_PLAYER_ARRAY (and the Seamless Coop
-   extension) should be excluded. Otherwise focus_reason=3 (nearest) latches
-   onto whichever friendly is closest, not the boss. Boss-bar detection
-   should still pick up bosses correctly via boss_bar_handles[].
-4. **Audible F11 feedback.** On F11 transition, emit a `MessageBeep` from
-   the probe DLL:
-   - ARMED → `MB_ICONASTERISK` (system beep, lower tone, 2 short beeps)
-   - DISARMED → `MB_ICONEXCLAMATION` (system beep, higher tone, 1 long beep)
-   - Make it OBVIOUS which is which. Test on station before deploying.
-5. **Status indicator** — write a small PowerShell or batch script that
-   tails the probe's `.log.txt` and prints ARMED/DISARMED with a timestamp
-   to a console window. Josh can keep it on a second monitor.
+4. **Research-007 (v6.2 capture analysis).** 8,773 focused rows of c4382
+   Knight. Q1 (world pos) → phys-chain wins. Q3 (lock-on) → `+0x6B0` wins.
+   Q2 (enemy anim_id) → dead end; stationary-enemy artifact.
 
-**What NOT to change:**
-- World pos legacy fields (`+0x6C0` for player, `field_at_0x06C` for enemy)
-  — KEEP both legacy + phys reads in wire format. Cost is minimal. Future
-  re-analysis stays unambiguous.
-- Lock-on legacy `+0x6A0` — KEEP in wire format (probe still writes it,
-  parser still reads it) for v6.3 capture comparability.
-- The v6.2 schema-v2 instrumentation block in the wire format. Even though
-  the regions are dropped, the per-enemy and per-sample v6.2 fields stay
-  populated — they're useful (anim_id_path_b/c are still good debug data;
-  phys_module pointer enables future re-targeting work).
+5. **Probe v6.3 module-bag-wide instrumentation.** REGION_MODULE_BAG_MEMBER (9).
+   Lock-on derivation fixed. Codex deep-critic caught two P1 analyzer bugs.
 
-## Multi-boss capture workflow (tonight)
+6. **Research-008 (v6.3 capture analysis) — Q2 SOLVED.** 12,467 focused rows,
+   ~144 s. Path A (`TimeAct + 0xD0`) confirmed correct. The probe was right
+   all along.
 
-**Game session flow:**
-1. Boot game. Probe auto-attaches.
-2. Walk to first boss arena.
-3. F11 to arm → wait for double-low beep.
-4. Engage. Wipe and retry as many times as needed (probe stays armed
-   through wipes — the .bin file is never closed mid-session).
-5. Kill the boss. F11 to disarm → wait for single-high beep.
-6. Tell Claude: "done with <boss name>". Claude pulls the .bin local +
-   archives a snapshot.
-7. Walk to next boss. F11 to arm. Repeat.
-8. End of session: F11 disarm, quit game cleanly, tell Claude.
+7. **Probe v6.4 production build** deployed to `/mnt/station-mods/`. Drops
+   instrumentation regions 6/7/8/9. Co-op safety. Audible F11 feedback.
 
-**Co-op specifics:**
-- Up to 6 player characters in lobby (Josh + 5 friends). Sometimes Josh is
-  the host; sometimes another friend is host and Josh is a guest using
-  someone else's character. **Probe v6.4 excludes all friendlies from
-  roster sweep** — focus_reason picks the boss (via boss_bar_handles[])
-  when fighting a real boss with an HP bar.
-- For non-boss-bar enemies (random mobs), focus_reason=3 (nearest) will
-  still pick the closest non-player. That's fine — we're not analyzing
-  random mobs.
+8. **Supporting tools shipped:** `tools/probe-status.ps1` (deployed to
+   station), `tools/archive_session.sh`, `tools/segment_by_f11.py`. All had
+   Codex deep-critic passes; P1 findings fixed before deploy.
 
-**File handling on Claude's side:**
-- After each "done" signal: copy `qualification-NNNN.bin` from
-  `/mnt/station-projects/elden-ring/logs/` to a session-archive dir under
-  `/home/joshua.blattner/claude/elden-ring/captures/sessions/YYYYMMDD/`.
-- Also copy the `.log.txt` (small) and `.csv` (medium) — even though we
-  primarily analyze the .bin, keep the CSV for human inspection if needed.
-- The .bin contains ALL boss fights from the session interleaved — segment
-  by F11 ARMED/DISARMED log timestamps. The log txt has `F11: armed` and
-  `F11: disarmed` lines with the relative ms.
+9. **HANDOFF.md** rewritten with full tonight-session operating manual.
 
-**What we keep forever:**
-- Every .bin → `captures/sessions/YYYYMMDD/<session-name>.bin`
-- Every .log.txt → same dir
-- Every CSV → same dir
-- A `captures/sessions/YYYYMMDD/README.md` with the boss list + Josh's
-  notes on which c-ids he thinks each boss was
+**Deep-critic gatekeeping:** 8 findings across v6.2/v6.3/v6.4 tooling (5 P1,
+3 P2) — all caught and fixed before deploy/capture.
 
-We don't truncate or rewrite anything. Re-analysis with future tooling
-(better anim_id correlator, better predictor) will always have raw data
-to work from.
+## Next steps (priority order)
 
-## What's NOT in v6.4 (deliberately deferred)
+1. **Tonight:** Josh plays multi-boss co-op session. Per boss-done report:
+   run `tools/archive_session.sh` then `tools/segment_by_f11.py` on the
+   archived session path.
+2. **Next session:** implement DB join-key fuzzy mapping in
+   `qualify_oracle.py`. Individual variant c-id (e.g. c4382) → parent family
+   (e.g. c4380). ~30-line Python change. This is the only blocker before
+   qualification can PASS.
+3. **Once join-key works:** achieve qualification PASS on c2130 Banished Knight
+   (79 parry windows in DB) or c4380 Knight (53 windows).
+4. **Then:** build the actual parry-prediction analyzer.
+5. **(Lower priority)** If Seamless Coop ever exposes >8 player slots in one
+   lobby, bump `FRIENDLY_SCAN_SLOTS` in `probe.cpp`.
 
-- Drop the Tier 3 region 4/5/8/9 emissions — RETAIN region 4 (time_act_child)
-  since it's useful for re-analysis. Drop region 8 (time_act_child_body,
-  was for v6.2 deep-body experiment) and region 9 (module_bag_member,
-  was for v6.3 wide-scan experiment) since their purpose is done.
-- Drop region 6 (phys_module_body) and region 7 (action_request_body) —
-  these were instrumentation; the values we needed (phys pos, anim
-  candidates) are in the header block now.
-- Lock-on legacy `+0x6A0` read in wire format — keep it. Cheap to retain,
-  expensive to lose if we ever need to re-cross-reference.
+## Open questions for Josh
 
-## Tools needed tonight (Claude-side)
+- None blocking tonight.
+- Tomorrow: worth discussing whether to extract parry data for c4311 (Godrick
+  Soldier) — it's a frequent fight enemy with no DB entries. Not blocking
+  anything, just a data-coverage question.
 
-- **Per-boss segmenter:** new `tools/segment_by_f11.py` that reads a .bin
-  + the .log.txt, finds ARMED/DISARMED boundaries, emits per-boss
-  sub-samples. Quick to write (~30 lines).
-- **Session archiver:** new `tools/archive_session.sh` that takes a
-  date + capture name and tarballs everything into the project tree
-  with the right naming convention. ~20 lines.
-- **Live tailer for Josh's status indicator** (delivered to Josh's
-  station): new `tools/probe_status.ps1` (PowerShell) that tails
-  `parry-tell-probe.boot.log` + the relevant `.log.txt`, prints
-  `ARMED at HH:MM:SS` / `DISARMED at HH:MM:SS` lines.
+## Tried and ruled out
 
-## Active files
+- `TimeActModule + 0x20 + read_idx*16` (vswarte anim_queue model) for enemy
+  anim_id: refuted by v6.2 fixture (all sentinels), confirmed v6.3 (still
+  sentinels — queue not used for AI-controlled enemies; player reads from
+  there OK).
+- `ActionRequestModule + 0x90` (Erd-Tools path) for enemy anim_id: sentinel
+  in both v6.2 and v6.3.
+- Module-bag-wide brute-force scan for c4380 anim IDs: v6.3 found only stable
+  structural fields at `bag+0x18+0x1F0` and `bag+0x58+0x9C` — not anim_id.
+- Path A "TimeAct + 0xD0" tentatively concluded WRONG in research-006/v6.2 —
+  that conclusion was wrong. v6.2 sample was a stationary enemy. v6.3 with
+  active combat confirmed path A is correct (the original v6.1.1 offset was
+  right all along).
 
-- `probe/probe.cpp` (v6.3 source, to be v6.4'd)
-- `tools/probe_bin.py` (schema v2 parser, no changes needed for v6.4)
-- `tools/analyze_v62_capture.py` (research-006/007 analyzer)
-- `tools/qualify_oracle.py` (anim_time → parry-window join; needs c-id
-  family fuzzy lookup before qualification can PASS — deferred to v6.5)
-- `data/parry_data.json` (107 chars with parry windows; 6,738 windows
-  total; complete, no bugs)
-- `data/research-fixture/` (c4382 sample used in research-006)
+## Files modified this session
 
-## Decision log
+- `probe/probe.cpp` — v6.1.1 → v6.2 → v6.3 → v6.4
+- `tools/probe_bin.py` — schema-v2 parser support; v6.4 region name labels
+- `tools/analyze_v62_capture.py` — NEW; extended in v6.3 for region 9 + source_chain
+- `tools/scan_for_anim_ids.py` — NEW (research-006 brute-force scanner)
+- `tools/archive_session.sh` — NEW
+- `tools/probe-status.ps1` — NEW; deployed to `C:\Projects\elden-ring\`
+- `tools/segment_by_f11.py` — NEW
+- `probe/v6.2/{CHANGES.md, probe-v6.2.patch}` — NEW
+- `probe/v6.3/{CHANGES.md, probe-v6.3.patch}` — NEW
+- `probe/v6.4/{CHANGES.md, probe-v6.4.patch}` — NEW
+- `probe/releases/parry-tell-probe-v6.{2,3,4}.dll` + `.tar.gz` — NEW
+- `research/006-SYNTHESIS.md`, `006-claude-deep-research.findings.jsonl`,
+  `006-codex-research.md`, `006-fixture-verification.md` — NEW
+- `research/007-v62-capture-analysis-codex.md` — NEW
+- `research/008-v63-capture-analysis-codex.md` — NEW
+- `captures/sessions/20260511/` — v6.3 capture archived + `segments.json`
+- `captures/.gitignore` — NEW (raw .bin excluded; manifests + log.txt tracked)
+- `HANDOFF.md` — rewritten
 
-- 2026-05-11 ~12:00: probe v6.1.1 deployed; capture qualification-20260511-133002.bin
-- 2026-05-11 ~14:00: research-006 (deep-research + Codex deep-research)
-  concluded path A was wrong; bundled three-offset fix proposed
-- 2026-05-11 ~15:00: fixture verification REFUTED path A AND B (queue all
-  sentinels) — research-006's vendor consensus was right in the abstract
-  but didn't match c4382 fixture bytes; v6.2 instrumentation build commissioned
-- 2026-05-11 ~18:50: v6.2 (instrumentation w/ Codex deep-review fixes) deployed
-- 2026-05-11 ~19:20: v6.2 capture (qualification-20260511-191334.bin) →
-  research-007 analysis: Q1 phys-chain wins, Q3 +0x6B0 wins, Q2 dead end
-- 2026-05-11 ~19:55: v6.3 (module-bag-wide instrumentation + lock-on
-  derivation fix) deployed
-- 2026-05-11 ~20:08: v6.3 capture (qualification-20260511-195759.bin) →
-  Q2 was always correct, path A reads valid anim_ids when enemy is animating.
-  v6.2 had a stationary-enemy sample, that's all.
-- 2026-05-11 20:30: v6.4 cleanup planned for tonight's multi-boss session.
+## Services / processes
+
+- No Claude-side services restarted.
+- SSH from Linux VM to Windows station ran MSBuild three times (v6.2, v6.3,
+  v6.4). Probe DLL deployed three times to `/mnt/station-mods/` between game
+  restarts on station.
+
+## Git state at session close
+
+- **Branch:** `main`
+- **Unpushed commits:** 19+ (post-session-close tag will add ~2 more)
+- **Recent commits (last 10):**
+  - `63885eb` docs(handoff): document tonight's co-op session operating manual
+  - `7cc9a45` feat(probe-v6.4): production cleanup + co-op safety + audible F11 + tooling
+  - `6016681` chore(cp): v6.4 plan logged in HANDOFF.md; starting cleanup
+  - `9d1ce95` chore(cp): bundle v6.3 DLL artifact
+  - `b8222ef` feat(probe-v6.3): module-bag-wide enemy anim_id instrumentation + lock-on derivation fix
+  - `023ad0e` chore(cp): pre-v6.3 module-bag-wide instrumentation
+  - `ec4a140` fix(probe-v6.2): apply Codex deep-review P1 findings before capture session
+  - `f074059` chore(cp): probe v6.2 instrumentation build — dual-read three offset candidates per research 006
+  - `7803947` chore(cp): pre-v6.2 instrumentation build research 006 synthesis locked
+  - `97d7e29` research: ER 2.6.1 ChrIns offset investigation prompt + post-compact pickup
+- **Session-close tag:** `session-close/2026-05-11-<HHMMSS>` (created at step 5
+  of the session-close runbook; check `git tag --list | tail` after close).
+
+## Pickup prompt for next session
+
+```
+Resume parry-tell-probe. Read HANDOFF.md first.
+
+Tonight's co-op session may have produced new captures in
+/mnt/station-mods/ (or already archived to captures/sessions/20260511/).
+If Josh reports "done with <boss>", run:
+  tools/archive_session.sh
+  tools/segment_by_f11.py captures/sessions/20260511/<session-name>
+
+Primary next task: implement DB join-key fuzzy mapping in
+qualify_oracle.py so c4382 (individual variant) maps to c4380 (parent
+family). This is the only blocker before qualification can PASS.
+~30-line Python change. Then run qualify_oracle.py against a c2130
+Banished Knight or c4380 Knight capture.
+
+Probe v6.4 is deployed and correct. No probe changes needed unless
+tonight's session surfaces a new issue.
+```
