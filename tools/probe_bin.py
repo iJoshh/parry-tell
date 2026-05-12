@@ -48,6 +48,10 @@ REGION_NAMES = {
     8: "time_act_child_body",
     # v6.3 instrumentation regions (schema still v2; additive):
     9: "module_bag_member",
+    # v7.0 target-of-attention research regions (Phase 4.0 Gate 0.B):
+    10: "ai_bag_head",
+    11: "ai_struct_head",
+    12: "module_bag_head",
 }
 
 CAPTURE_MODE_NAMES = {1: "smoke", 2: "qualification", 3: "discovery"}

@@ -72,7 +72,22 @@
 // Constants
 // ===========================================================================
 
-#define PROBE_VERSION_STR "v6.4"
+#define PROBE_VERSION_STR "v7.0-target-scan"
+// v7.0-target-scan (Phase 4.0 Gate 0.B research build, 2026-05-11):
+// Adds three new Tier 3 region captures around the AI struct, AI bag, and
+// module bag head, so the offline analyzer (`tools/analyze_target_field.py`)
+// can scan every 8-byte slot for the player's ChrIns* and rank candidate
+// target-of-attention offsets. Emitted only on focused enemies (the focus
+// emphasis gate already used for TIME_ACT_FOCUS). All other behavior is v6.4.
+//   New regions (additive, no schema break — IDs 10/11/12):
+//     REGION_AI_BAG_HEAD     (10): ai_bag    +0x000..+0x400 (1024 B)
+//     REGION_AI_STRUCT_HEAD  (11): ai_struct +0x000..+0x1000 (4096 B) PRIMARY
+//     REGION_MODULE_BAG_HEAD (12): module_bag +0x000..+0x100 (256 B)
+//   The existing REGION_AI_STRUCT (5) at +0xE000..+0xF000 stays as a fallback
+//   territory in case the target field doesn't live in the head.
+//   Co-op safety unchanged: read-only memory only, SEH-wrapped derefs,
+//   loader-lock-safe DllMain, friendly-PC exclusion intact.
+//
 // v6.4 (production after research-007 v6.3 capture analysis): the v6.3 capture
 // resolved ALL THREE research-006 offset questions with high confidence:
 //   Q1 world pos: phys-chain (bag→+0x68→+0x70) wins; legacy +0x6C0 also works
@@ -142,6 +157,16 @@ static constexpr size_t REGION_CAP_MODULE_BAG_MEMBER = 0x200;   //  512 — modu
 static constexpr int    MODULE_BAG_MEMBER_SCAN_BYTES = 0x100;   //  256 bytes of bag head scanned
 static constexpr int    MODULE_BAG_MEMBER_MAX        = 16;      //  cap modules captured per focused enemy
 
+// v7.0 target-of-attention research regions (Phase 4.0 Gate 0.B):
+// Capture wide windows around the AI struct, AI bag, and module bag head so the
+// offline analyzer (`tools/analyze_target_field.py`) can scan every 8-byte slot
+// for matches against the player's ChrIns* (already in the sample header at
+// player_chr_ins_abs). This is read-only instrumentation; no new memory writes,
+// no new pointer chains beyond what v6.4 already walks.
+static constexpr size_t REGION_CAP_AI_BAG_HEAD       = 0x400;   // 1024 — first 0x400 of ai bag (covers +0xC0 ai_struct ptr + surrounding slots)
+static constexpr size_t REGION_CAP_AI_STRUCT_HEAD    = 0x1000;  // 4096 — first 0x1000 of ai struct (PRIMARY target territory per research plan)
+static constexpr size_t REGION_CAP_MODULE_BAG_HEAD   = 0x100;   //  256 — first 0x100 of module bag (covers +0x38 ai, +0x50 talk, +0x58 event, +0x80 action_req)
+
 // Region IDs (spec §Region-relative offsets rev3):
 enum RegionId : uint8_t {
     REGION_CHR_INS_ROOT          = 0,
@@ -149,13 +174,17 @@ enum RegionId : uint8_t {
     REGION_TIME_ACT_MODULE       = 2,
     REGION_TIME_ACT_FOCUS        = 3,
     REGION_TIME_ACT_CHILD        = 4,
-    REGION_AI_STRUCT             = 5,
+    REGION_AI_STRUCT             = 5,   // legacy tail (+0xE000..+0xF000)
     // v6.2 instrumentation (schema v2):
     REGION_PHYS_MODULE           = 6,   // ChrPhysicsModule body (world pos leaf)
     REGION_ACTION_REQUEST        = 7,   // ActionRequest module body (enemy anim_id alt path)
     REGION_TIME_ACT_CHILD_BODY   = 8,   // first 3 TimeActChild bodies (deeper capture)
     // v6.3 instrumentation (research 007 follow-up):
     REGION_MODULE_BAG_MEMBER     = 9,   // body of any valid pointer in module bag head [0..0x100]
+    // v7.0 target-of-attention research (Phase 4.0 Gate 0.B):
+    REGION_AI_BAG_HEAD           = 10,  // ai bag +0x000..+0x400 (1024 bytes)
+    REGION_AI_STRUCT_HEAD        = 11,  // ai struct +0x000..+0x1000 (4096 bytes) PRIMARY
+    REGION_MODULE_BAG_HEAD       = 12,  // module bag +0x000..+0x100 (256 bytes)
 };
 
 // Capture modes (spec §Modes):
@@ -1424,6 +1453,7 @@ struct EnemySnapshot {
     uint32_t  field_at_0x1E8 = 0;
     uintptr_t module_bag     = 0;
     uintptr_t time_act       = 0;
+    uintptr_t ai_bag         = 0;   // v7.0: stashed for AI_BAG_HEAD region capture
     uintptr_t ai_struct      = 0;
     uint32_t  anim_id        = 0;  // path A: TimeActModule + 0xD0 (legacy)
     float     anim_time[4]   = {0,0,0,0};
@@ -1521,6 +1551,7 @@ static bool EnemyReadTier2(uintptr_t chr_ins_abs, EnemySnapshot* s) {
     uintptr_t aibag = 0;
     if (SafeRead<uintptr_t>(chr_ins_abs + Off::CHR_INS_AI_STRUCT_BASE, &aibag) &&
         LooksLikeUserPtrFast(aibag)) {
+        s->ai_bag = aibag;   // v7.0: stash for AI_BAG_HEAD region
         uintptr_t ai = 0;
         if (SafeRead<uintptr_t>(aibag + Off::AI_BAG_AI_STRUCT_PTR, &ai) &&
             LooksLikeUserPtrFast(ai)) {
@@ -1600,7 +1631,7 @@ static uint8_t WriteTier3ForEnemy(Writer& w,
         }
     }
 
-    // Region 5: ai_struct (+0xE000..+0xF000)
+    // Region 5: ai_struct (+0xE000..+0xF000) — legacy tail territory
     if (s.ai_struct) {
         if (WriteRegionRecord(w, REGION_AI_STRUCT,
                               s.ai_struct, 5u,
@@ -1616,6 +1647,42 @@ static uint8_t WriteTier3ForEnemy(Writer& w,
     // captured (phys pos, anim candidates B/C, module pointer absolutes)
     // are still in the v6.2 header block on every focused row, so future
     // re-analysis can still work with that header data.
+
+    // v7.0 target-of-attention research regions (Phase 4.0 Gate 0.B):
+    // Capture wide windows around AI struct head, AI bag head, and module bag
+    // head. Offline analyzer scans for the player's ChrIns* pattern (which is
+    // already in the sample header at player_chr_ins_abs) inside these regions
+    // to rank candidate target-of-attention offsets. Read-only; no new chains.
+    // Emitted only for focused enemies (boss-bar / lock-on / nearest in
+    // qualification mode) — the broader roster doesn't justify the per-sample
+    // byte budget. include_focus_emphasis is the focused-enemy gate elsewhere
+    // in this function (see TIME_ACT_FOCUS); reuse it.
+    if (include_focus_emphasis) {
+        // Region 10: ai_bag head (+0x000..+0x400)
+        if (s.ai_bag) {
+            if (WriteRegionRecord(w, REGION_AI_BAG_HEAD,
+                                  s.ai_bag, 10u,
+                                  0, REGION_CAP_AI_BAG_HEAD,
+                                  false, 0)) ++count;
+            else return count;
+        }
+        // Region 11: ai_struct head (+0x000..+0x1000) — PRIMARY target territory
+        if (s.ai_struct) {
+            if (WriteRegionRecord(w, REGION_AI_STRUCT_HEAD,
+                                  s.ai_struct, 11u,
+                                  0, REGION_CAP_AI_STRUCT_HEAD,
+                                  false, 0)) ++count;
+            else return count;
+        }
+        // Region 12: module_bag head (+0x000..+0x100)
+        if (s.module_bag) {
+            if (WriteRegionRecord(w, REGION_MODULE_BAG_HEAD,
+                                  s.module_bag, 12u,
+                                  0, REGION_CAP_MODULE_BAG_HEAD,
+                                  false, 0)) ++count;
+            else return count;
+        }
+    }
 
     return count;
 }
