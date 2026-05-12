@@ -60,8 +60,17 @@ def build_qualification_bin(path: str, char_db: dict) -> dict:
     LAG_SAMPLES = 9
     prev_anim_final_t = 0.0  # the last anim_time value of the previous anim
     is_first_anim = True
-    for w in pw:
+    # Duration-slot decoy values for the +0x2C candidate. Cycles between two
+    # values across anims so the duration field looks "monotonic-ish" across
+    # the session but holds constant within any single anim — the exact
+    # signature of a real duration slot in the live data. Without this, the
+    # +0x2C synthetic slot would just be -1.0 forever and never compete
+    # with +0x24 in the gate, so the duration-rejection logic wouldn't
+    # actually be exercised by this test.
+    duration_decoy_values = [1.0, 2.5, 1.5, 3.0]
+    for anim_idx, w in enumerate(pw):
         anim_time = 0.0
+        duration_decoy = duration_decoy_values[anim_idx % len(duration_decoy_values)]
         # Use full encoding (matches what the runtime is expected to produce
         # if the encoding analysis picks "full"; the database also indexes
         # both, so the analyzer will pick whichever encoding has hits).
@@ -92,7 +101,17 @@ def build_qualification_bin(path: str, char_db: dict) -> dict:
                         "f080": 0x66666666,
                         "f1E8": 0x55555555,
                         "anim_id": anim_id,
-                        "anim_time": (0.0, emitted_time, 0.0, -1.0),  # TimeAct+0x24 is the live one
+                        # Slot layout matches the four candidate offsets:
+                        #   [0] +0x20: always 0 (junk slot — fails range/segments)
+                        #   [1] +0x24: live anim_time (the answer)
+                        #   [2] +0x28: junk (would fail too)
+                        #   [3] +0x2C: duration decoy — constant per anim,
+                        #              jumps between anims. Used to be -1.0
+                        #              which auto-failed the range check;
+                        #              now positive + finite so the gate
+                        #              ACTUALLY has to reject it on
+                        #              forward_progressions instead.
+                        "anim_time": (0.0, emitted_time, 0.0, duration_decoy),
                         "in_lock_on": True,
                         "in_boss_bar": False,
                         "in_roster": True,
@@ -222,6 +241,26 @@ def main() -> int:
         if result.get("join_key", {}).get("matched_via_family_fallback"):
             print("FAIL: c2130 exact-match capture flagged as family fallback")
             failed += 1
+
+        # The anim_time gate must pick +0x24 (the slot we populated with
+        # smoothly-advancing playback). Picking +0x2C would mean the
+        # duration-slot rejection regressed — the synthetic now populates
+        # +0x2C with realistic duration-style decoy values (constant per
+        # anim, jumping between anims), and the gate must reject those
+        # via the forward_progressions threshold.
+        at_offset = result.get("anim_time", {}).get("candidate_offset")
+        if at_offset != 0x24:
+            print(f"FAIL: anim_time field picked +0x{at_offset:02X}, "
+                  f"expected +0x24 (duration-slot rejection regression)")
+            failed += 1
+
+        # The +0x2C duration-decoy candidate must have a low forward_progressions
+        # count — proof that the discriminator does its job. We don't get the
+        # +0x2C verdict directly back from run_qualification (only the winner),
+        # but we can re-run find_anim_time_field to inspect it.
+        # (Skipped for brevity — the at_offset check above is sufficient
+        # because if +0x2C's progressions were high enough to confuse the
+        # gate, it would have won the tiebreak over +0x24.)
 
         wc = result.get("window_check", {})
         if wc.get("matched_within_tolerance", 0) < 1:

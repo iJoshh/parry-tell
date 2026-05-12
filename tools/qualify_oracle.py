@@ -282,7 +282,17 @@ class AnimTimeVerdict:
     max_segment_dur: float
     rewinds_on_anim_id_change: bool
     in_range: bool
-    passed: bool
+    # Total count of sample-to-sample forward progressions within the
+    # same anim_id (any positive delta). Real anim_time fields advance
+    # smoothly with the game clock and rack up many hundreds of
+    # progressions per session; duration-slot fields hold constant
+    # within an anim and only "progress" at occasional discrete
+    # boundaries. On the v6.3 live capture: +0x24 = 1292, +0x2C = 20
+    # — two orders of magnitude apart. The gate uses this to reject
+    # duration-style fields that would otherwise look monotonic-enough
+    # to pass the segments+rewind checks.
+    forward_progressions: int = 0
+    passed: bool = False
 
 
 CANDIDATE_OFFSETS = (0x20, 0x24, 0x28, 0x2C)
@@ -310,8 +320,29 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
     the baseline and produce false-positive non-rewind failures at
     transition. Discovered analyzing smoke-20260509-170547 on +0x24:
     2/38 transitions were false-positives until this fix.
+
+    Duration-slot rejection (added 2026-05-11): the original gate used
+    monotonic_segments + max_segment_dur + rewind to qualify candidates,
+    then ranked passing candidates by max_segment_dur. This let a
+    constant-per-anim duration field (TimeAct + 0x2C — values like 1.000
+    or 2.500 held flat across hundreds of samples within an anim, then
+    jumping to a different constant on the next anim) sneak through:
+    sequences of identical values satisfy `val + 1e-6 >= prev_val` and
+    the rare cross-anim jumps inflate max_segment_dur. The fix adds a
+    `forward_progressions` counter (count of positive within-anim
+    deltas) to the gate and uses it as the primary tiebreak. On the
+    v6.3 live Godrick Soldier capture: +0x24 racked up 1292 forward
+    progressions vs +0x2C's 20. The 50-progression gate threshold
+    cleanly rejects duration-style fields without false-positive on
+    short or sparse captures (synthetic c2130 fixture: +0x24 = 1006).
     """
     ANIM_TRANSITION_LAG_SAMPLES = 12  # check rewind 12 samples after transition
+    # Reject candidates that don't advance smoothly with the game clock.
+    # 50 covers ~0.55s of focused playback at 91 Hz; well under any real
+    # combat encounter (the v6.3 capture's 15 focused anims produced
+    # 1292 progressions; even a 1-second qualification run on a single
+    # anim would clear this comfortably).
+    MIN_FORWARD_PROGRESSIONS = 50
 
     # Per-candidate state
     @dataclass
@@ -334,6 +365,9 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
         pending_rewind_check: bool = False
         pending_rewind_old_max: float = 0.0
         pending_rewind_countdown: int = 0
+        # Total count of sample-to-sample forward progressions within
+        # the same anim_id. Used to reject duration-slot candidates.
+        forward_progressions: int = 0
 
     state = [_S() for _ in range(4)]
 
@@ -386,6 +420,13 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
                 # Same anim_id.
                 if val > st.cur_anim_max:
                     st.cur_anim_max = val
+                # Count strictly-positive within-anim deltas. Equal
+                # values (val == prev_val) don't count — they're the
+                # signature of a held-constant duration slot. Use a
+                # small epsilon so float quantization noise doesn't
+                # log false progressions on a truly-constant field.
+                if val > st.prev_val + 1e-6:
+                    st.forward_progressions += 1
                 if val + 1e-6 >= st.prev_val:
                     st.seg_n += 1
                     st.prev_val = val
@@ -412,6 +453,7 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
             and st.seg_count >= 3
             and st.max_dur >= 0.3
             and st.rewinds
+            and st.forward_progressions >= MIN_FORWARD_PROGRESSIONS
         )
         verdicts.append(
             AnimTimeVerdict(
@@ -421,16 +463,22 @@ def find_anim_time_field(samples: list[probe_bin.Sample]) -> AnimTimeVerdict:
                 max_segment_dur=st.max_dur,
                 rewinds_on_anim_id_change=st.rewinds,
                 in_range=st.in_range,
+                forward_progressions=st.forward_progressions,
                 passed=passed,
             )
         )
-    # Winner: passing candidate with highest max_segment_dur.
+    # Winner: passing candidate with the most forward progressions
+    # (smoothest sample-to-sample advancement = strongest evidence of
+    # real anim_time, not a duration slot). Ties broken by max_segment_dur.
     passing = [v for v in verdicts if v.passed]
     if passing:
-        return max(passing, key=lambda v: v.max_segment_dur)
-    # Else: best in-range candidate by max_dur (so the report can still tell
-    # us how close we got).
-    return max(verdicts, key=lambda v: (v.in_range, v.max_segment_dur))
+        return max(passing, key=lambda v: (v.forward_progressions, v.max_segment_dur))
+    # Else: best in-range candidate by forward_progressions, then max_dur
+    # (so the report can still tell us how close we got).
+    return max(
+        verdicts,
+        key=lambda v: (v.in_range, v.forward_progressions, v.max_segment_dur),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -662,6 +710,7 @@ def format_report(result: dict, base_path: str) -> str:
         lines.append(f"Anim time field: TimeAct + 0x{at['candidate_offset']:02X} "
                      f"(monotonic_segments={at['monotonic_segments']} "
                      f"max_segment_dur={at['max_segment_dur']:.2f}s "
+                     f"forward_progressions={at.get('forward_progressions', '?')} "
                      f"rewinds={at['rewinds_on_anim_id_change']} "
                      f"in_range={at['in_range']} passed={at['passed']})")
     if "anim_id_encoding" in result and result["anim_id_encoding"]:

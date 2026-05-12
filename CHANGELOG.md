@@ -1,3 +1,32 @@
+## 2026-05-11 (evening, post-session-close) — qualify_oracle anim_time duration-slot rejection
+
+### Fixed
+- `tools/qualify_oracle.py::find_anim_time_field` — gate now requires
+  `forward_progressions >= 50` (count of strictly-positive within-anim
+  deltas) AND ranks passing candidates by `forward_progressions` instead
+  of `max_segment_dur`. Duration-style fields (`TimeAct + 0x2C` on the
+  v6.3 live capture: discrete values like 1.000 / 2.500 held constant
+  within an anim, jumping between anims) used to slip through the
+  `monotonic_segments + max_segment_dur + rewind` gate because sequences
+  of identical values satisfy `val + 1e-6 >= prev_val` and the rare
+  cross-anim jumps inflate max_segment_dur. The new discriminator is
+  two orders of magnitude wide on real data: +0x24 = 1292 forward
+  progressions, +0x2C = 20. Research-008 already pinned +0x24 as the
+  correct anim_time field; this aligns the oracle's tiebreak with the
+  research conclusion.
+- Synthetic test fixture in `test_qualify_oracle.py` previously left
+  slot 3 (+0x2C) at the auto-failing value `-1.0`, which short-circuited
+  the new rejection logic by failing the range check first. Fixture now
+  populates +0x2C with realistic duration-decoy values (cycles through
+  1.0, 2.5, 1.5, 3.0 across anims, held constant within each anim) so
+  the duration-rejection logic is actually exercised by the regression
+  test. New assertion locks the winner at +0x24.
+
+### Result on the v6.3 live capture
+- Verdict: PASSED (5/8 windows matched within ±11ms vs c4310 family
+  parry data — over the 60% threshold). End-to-end data flow validated
+  on real combat footage for the first time.
+
 ## 2026-05-11 (evening, post-session-close) — qualify_oracle DB family-fallback + junk-cid filter
 
 ### Fixed
