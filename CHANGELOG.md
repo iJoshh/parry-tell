@@ -1,3 +1,41 @@
+## 2026-05-11 (evening, post-session-close) — qualify_oracle DB family-fallback + junk-cid filter
+
+### Fixed
+- `tools/qualify_oracle.py::find_join_key` — captured c-ids that don't have
+  their own DB row (e.g. `c4311` Godrick Soldier) now fall back to the parent
+  family entry (`c4310`, round-down-to-nearest-10). The DB is keyed at the
+  family-parent level for 262/281 c-ids; the 19 unique-entity exceptions
+  (e.g. `c3251` Erdtree Avatar) still take exact-match precedence so we
+  don't silently round their data off. Verdict includes a new
+  `matched_via_family_fallback` flag for honest reporting.
+- `tools/qualify_oracle.py::find_join_key` — also fixed a latent bug where
+  the 7-field candidate scan would match junk `field_at_0x1E8 = 0` against
+  the player-skeleton row `c0000` (4039 player parry windows). Two new
+  filters: candidates with value < 1000 are skipped (real enemy c-ids are
+  always >= 1000), and candidates whose matched character has zero parry
+  windows are skipped (a join-key field that resolves to a parry-less row
+  is structurally not what we want). Caught when the v6.3 capture's
+  oracle run picked `field_at_0x1E8 = 0 → c0000` instead of the correct
+  `field_at_0x064 = 4311 → c4310-via-fallback`.
+
+### Added
+- `tools/test_qualify_oracle.py::test_family_fallback_lookup` — five-case
+  unit test covering exact match (c2130), family fallback (c4311 → c4310),
+  exact-takes-precedence (c3251 has its own row AND c3250 exists), absent
+  c-id (c9999), and already-multiple-of-10-but-absent (c9990, must not
+  loop). End-to-end test gains a regression check that c2130 exact
+  matches do NOT get flagged as family fallbacks.
+
+### Known follow-up (not blocking the join-key fix)
+- `qualify_oracle::find_anim_time_field` tiebreak picks `TimeAct + 0x2C`
+  on live v6.3 data because the gate uses `max_segment_dur` as the
+  primary key — but `+0x2C` is the per-anim duration slot (discrete
+  values like 1.000, 2.500), not animation time. The smaller, simpler
+  `calibrate_smoke` gate correctly rejects `+0x2C` as "constant-per-anim
+  duration"; `qualify_oracle` needs the same rejection. Research-008
+  pinned `+0x24` as the canonical anim_time field — qualify_oracle just
+  picks the wrong winner. Separate fix; tracked for the next session.
+
 ## 2026-05-11 — Probe v6.4 production; research-006/007/008 + three offset questions resolved
 
 ### Added

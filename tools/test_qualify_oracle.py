@@ -139,6 +139,53 @@ def build_qualification_bin(path: str, char_db: dict) -> dict:
     }
 
 
+def test_family_fallback_lookup() -> int:
+    """Unit test for _lookup_with_family_fallback. The DB is keyed by
+    family-parent for most c-ids (multiples of 10); variants like c4311
+    don't have their own row and must fall back to c4310. The 19 exception
+    c-ids (e.g. c3251) have their own rows and must NOT round down.
+    """
+    char_db = qualify_oracle.load_database(qualify_oracle.DEFAULT_DATABASE_PATH)
+    failed = 0
+
+    # Case 1: exact match (c2130 has its own DB row with parry windows).
+    cd, fallback = qualify_oracle._lookup_with_family_fallback(2130, char_db)
+    if cd is None or cd.cid != "c2130" or fallback:
+        print(f"FAIL: exact lookup c2130 returned ({cd.cid if cd else None}, fallback={fallback})")
+        failed += 1
+
+    # Case 2: family fallback (c4311 → c4310). The v6.3 live capture saw
+    # c4311 Godrick Soldiers; this is the canonical fallback case.
+    cd, fallback = qualify_oracle._lookup_with_family_fallback(4311, char_db)
+    if cd is None or cd.cid != "c4310" or not fallback:
+        print(f"FAIL: c4311 fallback returned ({cd.cid if cd else None}, fallback={fallback})")
+        failed += 1
+
+    # Case 3: exact takes precedence over fallback (c3251 has its OWN row
+    # with parry windows AND c3250 also exists). Must return c3251, not
+    # round down silently.
+    cd, fallback = qualify_oracle._lookup_with_family_fallback(3251, char_db)
+    if cd is None or cd.cid != "c3251" or fallback:
+        print(f"FAIL: c3251 should self-match, got ({cd.cid if cd else None}, fallback={fallback})")
+        failed += 1
+
+    # Case 4: completely-absent c-id (c9999 not in db, c9990 not in db).
+    # Must return (None, False) — no silent match against an unrelated row.
+    cd, fallback = qualify_oracle._lookup_with_family_fallback(9999, char_db)
+    if cd is not None:
+        print(f"FAIL: c9999 returned {cd.cid} instead of None")
+        failed += 1
+
+    # Case 5: value is already a multiple of 10 but absent from DB.
+    # Must not loop — return (None, False) without retrying.
+    cd, fallback = qualify_oracle._lookup_with_family_fallback(9990, char_db)
+    if cd is not None:
+        print(f"FAIL: c9990 returned {cd.cid} instead of None")
+        failed += 1
+
+    return failed
+
+
 def main() -> int:
     char_db = qualify_oracle.load_database(qualify_oracle.DEFAULT_DATABASE_PATH)
     if not char_db:
@@ -146,6 +193,10 @@ def main() -> int:
         return 1
 
     failed = 0
+
+    # Unit tests on the family-fallback helper.
+    failed += test_family_fallback_lookup()
+
     with tempfile.TemporaryDirectory() as tmp:
         bin_path = os.path.join(tmp, "qualification-test.bin")
         meta = build_qualification_bin(bin_path, char_db)
@@ -165,6 +216,11 @@ def main() -> int:
         if result.get("join_key", {}).get("matched_cid") != meta["expected_cid"]:
             print(f"FAIL: matched_cid was {result.get('join_key', {}).get('matched_cid')} "
                   f"expected {meta['expected_cid']}")
+            failed += 1
+
+        # The c2130 exact-match capture must NOT be flagged as family-fallback.
+        if result.get("join_key", {}).get("matched_via_family_fallback"):
+            print("FAIL: c2130 exact-match capture flagged as family fallback")
             failed += 1
 
         wc = result.get("window_check", {})

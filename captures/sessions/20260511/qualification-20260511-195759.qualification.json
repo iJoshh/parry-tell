@@ -1,0 +1,36 @@
+{
+  "verdict": "FAILED",
+  "reason": "only 1/8 predicted windows matched observations within \u00b111.0 ms. Either the join key is wrong, the anim_time field is wrong, or the database is wrong for cid=c4310.",
+  "samples": 12467,
+  "join_key": {
+    "field_name": "field_at_0x064",
+    "constant_value": 4311,
+    "matched_cid": "c4310",
+    "rows_observed": 6814,
+    "distinct_values": 1,
+    "matched_via_family_fallback": true
+  },
+  "anim_time": {
+    "candidate_index": 3,
+    "candidate_offset": 44,
+    "monotonic_segments": 259,
+    "max_segment_dur": 3.5999999046325684,
+    "rewinds_on_anim_id_change": true,
+    "in_range": true,
+    "passed": true
+  },
+  "anim_id_encoding": {
+    "encoding": "full",
+    "matches": 8,
+    "total_db": 45
+  },
+  "window_check": {
+    "cid": "c4310",
+    "db_windows_for_observed_anims": 8,
+    "db_windows_total": 49,
+    "matched_within_tolerance": 1,
+    "misses": 7,
+    "not_found_in_db": 41,
+    "tolerance_ms": 11.0
+  }
+}

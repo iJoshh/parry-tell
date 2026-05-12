@@ -158,6 +158,37 @@ class JoinKeyVerdict:
     matched_cid: str
     rows_observed: int
     distinct_values: int
+    # True when the captured c-id had no exact DB row and we matched the
+    # parent family (round down to nearest 10). E.g. captured c4311 →
+    # matched c4310 family. Honest reporting flag — does NOT mean the
+    # match is wrong, but downstream callers should know parry windows
+    # come from the family entry, not a variant-specific row.
+    matched_via_family_fallback: bool = False
+
+
+# Family lookup: most variants (c4311, c4382, c2131) inherit parry data
+# from the parent family entry (c4310, c4380, c2130). The DB is keyed at
+# the "tens" level for these — 262/281 c-ids in the DB are multiples of
+# 10. The 19 exceptions (e.g. c3251, c3252, c5051) are unique entities
+# with their own DB rows; we try exact match FIRST to preserve those.
+def _lookup_with_family_fallback(
+    value: int,
+    char_db: dict[int, CharData],
+) -> tuple[Optional[CharData], bool]:
+    """Returns (char_data, used_fallback). char_data is None when neither
+    exact nor family-parent match exists in char_db.
+    """
+    exact = char_db.get(value)
+    if exact is not None:
+        return exact, False
+    parent = (value // 10) * 10
+    if parent == value:
+        # Already a multiple of 10 and not in db; no fallback possible.
+        return None, False
+    parent_cd = char_db.get(parent)
+    if parent_cd is not None:
+        return parent_cd, True
+    return None, False
 
 
 def find_join_key(
@@ -165,7 +196,8 @@ def find_join_key(
     char_db: dict[int, CharData],
 ) -> Optional[JoinKeyVerdict]:
     """Find a field that's CONSTANT across all rows for the focused enemy
-    AND whose value matches a cXXXX in the database.
+    AND whose value matches a cXXXX in the database (exact or family
+    parent via round-down-to-nearest-10).
 
     Returns None if no field qualifies.
     """
@@ -196,22 +228,44 @@ def find_join_key(
         if len(distinct) != 1:
             continue
         v = next(iter(distinct))
-        if v in char_db:
-            candidates.append(
-                JoinKeyVerdict(
-                    field_name=fname,
-                    constant_value=v,
-                    matched_cid=char_db[v].cid,
-                    rows_observed=len(main_rows),
-                    distinct_values=len(distinct),
-                )
+        # Skip obviously-non-cid values. Real enemy c-ids in the game are
+        # always >= 1000 (c1000+ for enemies/NPCs/bosses). Values like 0,
+        # 5, 48, 100 are placeholders / role flags / category tags from
+        # other game-data slots that happened to land in our candidate
+        # field list — they are not character IDs even when they match
+        # a low-numbered DB row like c0000 (which is the player skeleton
+        # used for the player-character parry data, not for enemies).
+        if v < 1000:
+            continue
+        char_cd, used_fallback = _lookup_with_family_fallback(v, char_db)
+        if char_cd is None:
+            continue
+        # Require the matched character to have parry windows. A field
+        # that matches a DB row with zero parry windows can't be the
+        # enemy c-id we want for qualification anyway, and is more
+        # likely a false positive on a non-cid slot (e.g. a role/tag
+        # field whose constant value happens to collide with a DB key).
+        if not char_cd.parry_windows:
+            continue
+        candidates.append(
+            JoinKeyVerdict(
+                field_name=fname,
+                constant_value=v,
+                matched_cid=char_cd.cid,
+                rows_observed=len(main_rows),
+                distinct_values=len(distinct),
+                matched_via_family_fallback=used_fallback,
             )
+        )
 
     if not candidates:
         return None
-    # Prefer the EARLIEST field offset (most likely to be the canonical
-    # character ID slot per the offset research). Stable tie-break.
-    candidates.sort(key=lambda c: FIELD_NAMES.index(c.field_name))
+    # Prefer EXACT matches over family-fallback matches, then earliest
+    # field offset (most likely to be the canonical character ID slot
+    # per the offset research). Stable tie-break.
+    candidates.sort(
+        key=lambda c: (c.matched_via_family_fallback, FIELD_NAMES.index(c.field_name))
+    )
     return candidates[0]
 
 
@@ -528,7 +582,24 @@ def run_qualification(
         }
 
     # Step 3: predicted-vs-observed.
-    char = char_db[join_key.constant_value]
+    # Use the same family-fallback lookup as step 1 — char_db is keyed by
+    # the matched cid's numeric value, which for fallback matches is the
+    # PARENT family (e.g. 4310), not the captured raw value (4311).
+    char_cd, _ = _lookup_with_family_fallback(join_key.constant_value, char_db)
+    if char_cd is None:
+        # Defensive: find_join_key already proved this resolves, so this
+        # branch should be unreachable. Guard anyway so a future refactor
+        # of find_join_key doesn't silently crash here.
+        return {
+            "verdict": "FAILED",
+            "reason": (
+                "internal: join_key resolved in step 1 but char_db lookup "
+                "failed in step 3 — find_join_key and _lookup_with_family_fallback "
+                "have drifted out of sync."
+            ),
+            "join_key": join_key.__dict__,
+        }
+    char = char_cd
     encoding = determine_anim_id_encoding(samples, char)
     window_check = check_predicted_windows(
         samples, char, anim_time.candidate_index, encoding.encoding, tolerance_ms
@@ -577,7 +648,14 @@ def format_report(result: dict, base_path: str) -> str:
         lines.append("")
         lines.append(f"Join key: {jk['field_name']} (constant value {jk['constant_value']} "
                      f"over {jk['rows_observed']} focused-enemy rows)")
-        lines.append(f"Identified character: {jk['matched_cid']}")
+        if jk.get("matched_via_family_fallback"):
+            lines.append(
+                f"Identified character: {jk['matched_cid']} "
+                f"(FAMILY FALLBACK — captured c{jk['constant_value']} not in DB, "
+                f"matched parent family)"
+            )
+        else:
+            lines.append(f"Identified character: {jk['matched_cid']}")
     if "anim_time" in result and result["anim_time"]:
         at = result["anim_time"]
         lines.append("")
