@@ -32,3 +32,14 @@ arm_toggle = F11
 
 [diagnostics]
 verbose = true
+
+[prediction]
+; Smoke test: keep data_collection_mode=true so the smoke flow is unchanged
+; from v6/v7. Predictor runs in parallel and logs decisions; smoke doesn't
+; expect a parryable enemy so most decisions will be no_key.
+data_collection_mode = true
+prediction_enabled = true
+prediction_poll_interval_ms = 4
+audio_cue_lead_ms = 0
+target_filter_enabled = false
+prediction_decision_log_enabled = true

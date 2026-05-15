@@ -30,3 +30,14 @@ arm_toggle = F11
 
 [diagnostics]
 verbose = true
+
+[prediction]
+; Discovery: predictor runs alongside capture. Long-running sessions
+; benefit from the decision log for offline analysis of which animations
+; the predictor saw and what lead times were observed.
+data_collection_mode = true
+prediction_enabled = true
+prediction_poll_interval_ms = 4
+audio_cue_lead_ms = 0
+target_filter_enabled = false
+prediction_decision_log_enabled = true

@@ -30,3 +30,18 @@ arm_toggle = F11
 
 [diagnostics]
 verbose = true
+
+[prediction]
+; Phase 4.1: predictor runs alongside the data-collection hook.
+; data_collection_mode=true keeps the F11-armed sample capture active so
+; this INI is backward-compatible with the v6/v7 qualification workflow.
+; Set to false for production v0.1.0 (predictor only, no capture).
+data_collection_mode = true
+prediction_enabled = true
+prediction_poll_interval_ms = 4
+audio_cue_lead_ms = 0
+; Target filter: keep OFF for the first validation run so the decision log
+; shows lead-time math without target-suppression as a confounder. Flip to
+; true once we've confirmed predictions match qualify_oracle's PASS data.
+target_filter_enabled = false
+prediction_decision_log_enabled = true

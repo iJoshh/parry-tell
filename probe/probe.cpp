@@ -376,6 +376,16 @@ namespace Off {
     constexpr int AI_STRUCT_REGION_BEGIN     = 0xE000;
     constexpr int AI_STRUCT_REGION_END       = 0xF000;
 
+    // Phase 4.0 Gate 0.B finding: boss target-of-attention field.
+    //   ChrIns +0x580 (AIBag*) → +0xC0 (AIStruct*) → +0xC988 (FieldInsHandle u64)
+    // Sentinel value when no current target: 0xFFFFFFFFFFFFFFFF.
+    // Validated: 5,521 samples in v7.3 capture, 63.6% match vs player_handle,
+    // zero false positives across all alternative AI-struct slots scanned.
+    // TarnishedTool prior art names TargetingSystem @ +0xC480; 0xC988 sits
+    // at +0x508 into that sub-struct, plausibly `currentTarget`.
+    constexpr int AI_STRUCT_TARGET_HANDLE    = 0xC988;
+    constexpr uint64_t AI_STRUCT_TARGET_SENTINEL = 0xFFFFFFFFFFFFFFFFull;
+
     // CSFeManImp::bossHpBars[3] starts at +0x5BF0; per-slot 0x20; handle at +0x8.
     constexpr int CS_FE_MAN_BOSS_BARS_BASE   = 0x5BF0;
     constexpr int CS_FE_MAN_BOSS_BAR_STRIDE  = 0x20;
@@ -521,6 +531,31 @@ struct Config {
     // [diagnostics]
     bool verbose                = true;
 
+    // [prediction] — Phase 4.1 commit 4. Decoupled from capture/data path.
+    //
+    // data_collection_mode: when TRUE, install the existing detour hook and
+    //   write captures as v7.x did. When FALSE, skip hook install entirely
+    //   and run prediction only (production v0.1.0 default).
+    // prediction_enabled: master switch for the predictor poll. Default ON.
+    // prediction_poll_interval_ms: how often the worker reads game state and
+    //   evaluates predictions. Default 4ms (~250 Hz). Range [1, 33].
+    // audio_cue_lead_ms: cue fires when lead_time <= this value. 0 = at
+    //   window-open, positive = before, negative = after. Range [-200, 500].
+    // target_filter_enabled: when TRUE, suppress cues unless boss is
+    //   targeting local player. Default FALSE for first-commit smoke
+    //   validation (per Josh's call on the open-question loop); flip to
+    //   TRUE via INI once we've verified lead-time math is correct without
+    //   the target filter as a confounder.
+    // prediction_decision_log_enabled: write .predictions.jsonl. Default
+    //   TRUE when data_collection_mode=true OR mode!=smoke (i.e. for any
+    //   diagnostic-grade session).
+    bool data_collection_mode              = false;
+    bool prediction_enabled                = true;
+    int  prediction_poll_interval_ms       = 4;
+    int  audio_cue_lead_ms                 = 0;
+    bool target_filter_enabled             = false;
+    bool prediction_decision_log_enabled   = true;
+
     // [hotkeys] arm_toggle is hard-coded F11 in this build (matches v5f).
     // Spec config field is parsed but only F11 is honored.
 };
@@ -636,6 +671,20 @@ static bool LoadConfig(const char* path, Config* cfg) {
             if (_stricmp(key, "verbose") == 0) {
                 bool b; if (ParseBool(val, &b)) cfg->verbose = b;
             }
+        } else if (_stricmp(section, "prediction") == 0) {
+            if (_stricmp(key, "data_collection_mode") == 0) {
+                bool b; if (ParseBool(val, &b)) cfg->data_collection_mode = b;
+            } else if (_stricmp(key, "prediction_enabled") == 0) {
+                bool b; if (ParseBool(val, &b)) cfg->prediction_enabled = b;
+            } else if (_stricmp(key, "prediction_poll_interval_ms") == 0) {
+                cfg->prediction_poll_interval_ms = atoi(val);
+            } else if (_stricmp(key, "audio_cue_lead_ms") == 0) {
+                cfg->audio_cue_lead_ms = atoi(val);
+            } else if (_stricmp(key, "target_filter_enabled") == 0) {
+                bool b; if (ParseBool(val, &b)) cfg->target_filter_enabled = b;
+            } else if (_stricmp(key, "prediction_decision_log_enabled") == 0) {
+                bool b; if (ParseBool(val, &b)) cfg->prediction_decision_log_enabled = b;
+            }
         }
         // Unknown section / key: ignored with no warning (spec: "Unknown keys
         // ignored with warning"). We log unknown sections to boot log if verbose.
@@ -679,6 +728,22 @@ static bool LoadConfig(const char* path, Config* cfg) {
     }
     if (cfg->session_name[0] == 0) {
         strncpy_s(cfg->session_name, "session", _TRUNCATE);
+    }
+
+    // [prediction] range checks. Soft-clamp instead of fail-closed so a
+    // typo doesn't kill the whole process — we'd rather log and continue
+    // with a clamped value than refuse to start.
+    if (cfg->prediction_poll_interval_ms < 1 || cfg->prediction_poll_interval_ms > 33) {
+        BootLog("config_warn: prediction_poll_interval_ms=%d out of range [1,33]; clamping",
+                cfg->prediction_poll_interval_ms);
+        if (cfg->prediction_poll_interval_ms < 1) cfg->prediction_poll_interval_ms = 1;
+        if (cfg->prediction_poll_interval_ms > 33) cfg->prediction_poll_interval_ms = 33;
+    }
+    if (cfg->audio_cue_lead_ms < -200 || cfg->audio_cue_lead_ms > 500) {
+        BootLog("config_warn: audio_cue_lead_ms=%d out of range [-200,500]; clamping",
+                cfg->audio_cue_lead_ms);
+        if (cfg->audio_cue_lead_ms < -200) cfg->audio_cue_lead_ms = -200;
+        if (cfg->audio_cue_lead_ms > 500) cfg->audio_cue_lead_ms = 500;
     }
 
     return true;
@@ -4188,6 +4253,306 @@ static void WriteCalibrationReport() {
     LogF("calib_written: %s", path);
 }
 
+// ===========================================================================
+// Predictor game-state readers + worker tick (Phase 4.1 commit 4)
+// ===========================================================================
+//
+// These helpers translate SEH-wrapped game-memory reads into the inputs the
+// decision engine expects. They live AFTER all read primitives, the roster,
+// and the boss-bar offsets are defined, so we can call into them directly
+// from the worker's predictor tick.
+//
+// Co-op safety: every read is SafeRead-wrapped. No writes to game memory.
+// On any read failure, the input is marked unknown (target_known=false) or
+// the boss is skipped (returns false). Predictor errs on suppress, not fire.
+
+// Shutdown event for waitable polling sleep. Created by worker init (NOT
+// DllMain — per Decision G of the locked Phase 4.1 design doc; loader-lock-
+// adjacent allocations stay out of DllMain). g_running stays as the fast
+// flag the rest of the codebase already uses.
+static HANDLE g_shutdownEvent = nullptr;
+
+// Dereference WCM and return its address. Returns 0 on failure.
+static uintptr_t ReadWcm() {
+    if (!g_refs.wcmPtrAddr) return 0;
+    uintptr_t wcm = 0;
+    if (!SafeRead<uintptr_t>(g_refs.wcmPtrAddr, &wcm)) return 0;
+    if (!LooksLikeUserPtrFast(wcm)) return 0;
+    return wcm;
+}
+
+// Read the local player's FieldInsHandle. Returns true on success.
+//
+// Two-hop deref: WCM_PLAYER_ARRAY[0] holds a SLOT POINTER (not a ChrIns).
+// The slot pointer must be dereferenced one more time to get the actual
+// player ChrIns. This matches the existing capture-path semantics at
+// probe.cpp:3118-3127 (which Claude's first draft got wrong; Codex
+// caught the one-hop bug at review).
+//
+// We don't cache because slot 0 can be 0 during transitions (loading
+// screens, character creation) — re-read each tick and gracefully
+// report "no player" when it isn't there yet.
+static bool ReadLocalPlayerHandle(uint64_t* out_handle) {
+    if (!out_handle) return false;
+    uintptr_t wcm = ReadWcm();
+    if (!wcm) return false;
+
+    uintptr_t player_slot = 0;
+    if (!SafeRead<uintptr_t>(wcm + Off::WCM_PLAYER_ARRAY, &player_slot)) return false;
+    if (!LooksLikeUserPtrFast(player_slot)) return false;
+
+    uintptr_t player_chr_ins = 0;
+    if (!SafeRead<uintptr_t>(player_slot, &player_chr_ins)) return false;
+    if (!LooksLikeUserPtrFast(player_chr_ins)) return false;
+
+    uint64_t h = 0;
+    if (!SafeRead<uint64_t>(player_chr_ins + Off::CHR_INS_HANDLE, &h)) return false;
+    if (h == 0 || h == UINT64_MAX) return false;
+    *out_handle = h;
+    return true;
+}
+
+// Walk ChrIns → AIBag → AIStruct → +0xC988 (target FieldInsHandle).
+// Returns true and sets *out_handle on a clean walk. Returns false on any
+// dereference failure OR if the read FieldInsHandle is the sentinel
+// (0xFFFFFFFFFFFFFFFF, "no current target").
+static bool ReadBossTargetHandle(uintptr_t boss_chr_ins, uint64_t* out_handle) {
+    if (!out_handle || !boss_chr_ins) return false;
+
+    uintptr_t ai_bag = 0;
+    if (!SafeRead<uintptr_t>(boss_chr_ins + Off::CHR_INS_AI_STRUCT_BASE, &ai_bag)) {
+        return false;
+    }
+    if (!LooksLikeUserPtrFast(ai_bag)) return false;
+
+    uintptr_t ai_struct = 0;
+    if (!SafeRead<uintptr_t>(ai_bag + Off::AI_BAG_AI_STRUCT_PTR, &ai_struct)) {
+        return false;
+    }
+    if (!LooksLikeUserPtrFast(ai_struct)) return false;
+
+    uint64_t target = 0;
+    if (!SafeRead<uint64_t>(ai_struct + Off::AI_STRUCT_TARGET_HANDLE, &target)) {
+        return false;
+    }
+    if (target == Off::AI_STRUCT_TARGET_SENTINEL) return false;
+
+    *out_handle = target;
+    return true;
+}
+
+// Read boss anim_id and anim_time_s from the proven TimeAct path A:
+//   ChrIns +0x190 (ModuleBag*) → +0x18 (TimeAct*) → +0xD0 (anim_id u32)
+//                                                → +0x24 (anim_time_s f32)
+// Returns true on success. Sets *out_anim_id and *out_anim_time_s.
+static bool ReadBossAnimState(uintptr_t boss_chr_ins,
+                              uint32_t* out_anim_id,
+                              float* out_anim_time_s) {
+    if (!out_anim_id || !out_anim_time_s || !boss_chr_ins) return false;
+
+    uintptr_t mod_bag = 0;
+    if (!SafeRead<uintptr_t>(boss_chr_ins + Off::CHR_INS_MODULE_BAG_PTR, &mod_bag)) {
+        return false;
+    }
+    if (!LooksLikeUserPtrFast(mod_bag)) return false;
+
+    uintptr_t time_act = 0;
+    if (!SafeRead<uintptr_t>(mod_bag + Off::MODULE_BAG_TIME_ACT_PTR, &time_act)) {
+        return false;
+    }
+    if (!LooksLikeUserPtrFast(time_act)) return false;
+
+    uint32_t anim_id = 0;
+    float anim_time = 0.0f;
+    if (!SafeRead<uint32_t>(time_act + Off::TIME_ACT_ANIM_ID, &anim_id)) return false;
+    if (!SafeRead<float>(time_act + Off::TIME_ACT_TIME_CAND_1, &anim_time)) return false;
+
+    *out_anim_id = anim_id;
+    *out_anim_time_s = anim_time;
+    return true;
+}
+
+// Enumerate active boss-bar entries. Writes up to MAX_TRACKED_BOSSES handles
+// to out_handles. Returns the count actually populated (0..3). UINT64_MAX
+// and 0 are treated as "slot empty" and skipped.
+static int EnumerateActiveBossHandles(uint64_t* out_handles, int max_handles) {
+    if (!out_handles || max_handles <= 0) return 0;
+    if (!g_refs.csFeManPtrAddr) return 0;
+
+    uintptr_t feMan = 0;
+    if (!SafeRead<uintptr_t>(g_refs.csFeManPtrAddr, &feMan)) return 0;
+    if (!LooksLikeUserPtrFast(feMan)) return 0;
+
+    int n = 0;
+    int cap = (max_handles < Off::CS_FE_MAN_BOSS_BAR_COUNT)
+            ? max_handles : Off::CS_FE_MAN_BOSS_BAR_COUNT;
+    for (int b = 0; b < cap; ++b) {
+        uintptr_t slot = feMan + Off::CS_FE_MAN_BOSS_BARS_BASE +
+                         (uintptr_t)b * Off::CS_FE_MAN_BOSS_BAR_STRIDE +
+                         Off::CS_FE_MAN_BOSS_BAR_HANDLE;
+        uint64_t h = 0;
+        if (!SafeRead<uint64_t>(slot, &h)) continue;
+        if (h == 0 || h == UINT64_MAX) continue;
+        out_handles[n++] = h;
+    }
+    return n;
+}
+
+// Build a per-tick map of {target_handles[]} → {ChrIns* or 0}. Single
+// roster walk; resolves all requested handles in one pass. This is the
+// shape RunPredictorTick uses now (one walk per tick, not one per boss).
+//
+// Inputs:
+//   target_handles[] — up to N FieldInsHandles to resolve (UINT64_MAX
+//                      entries are treated as "skip slot").
+//   n_targets        — number of valid entries.
+// Outputs:
+//   out_chr_ins[]    — written with ChrIns* for each found handle, or
+//                      0 if not found. Length must be >= n_targets.
+//
+// Friendly PCs are NEVER returned (v6.4 friendly-exclusion semantics).
+static void ResolveBossHandlesBatch(const uint64_t* target_handles,
+                                    int n_targets,
+                                    uintptr_t* out_chr_ins) {
+    for (int i = 0; i < n_targets; ++i) out_chr_ins[i] = 0;
+    if (n_targets == 0) return;
+    if (!g_roster.enabled) return;
+
+    uintptr_t wcm = ReadWcm();
+    if (!wcm) return;
+
+    uintptr_t begin = 0, end = 0;
+    if (!SafeRead<uintptr_t>(wcm + Off::WCM_ROSTER_BEGIN, &begin)) return;
+    if (!SafeRead<uintptr_t>(wcm + Off::WCM_ROSTER_END,   &end))   return;
+    if (!begin || !end || end <= begin) return;
+
+    uintptr_t span_bytes = end - begin;
+    if (span_bytes > (uintptr_t)(2048 * sizeof(uintptr_t))) return;
+
+    // Gather friendly PCs once. Two-hop deref: WCM_PLAYER_ARRAY[i] holds
+    // a slot pointer that must be dereferenced once more to yield the
+    // player ChrIns*.
+    uintptr_t friendlyPCs[Off::PLAYER_ARRAY_LEN] = {0};
+    int friendlyCount = 0;
+    for (int i = 0; i < Off::PLAYER_ARRAY_LEN; ++i) {
+        uintptr_t slot_addr = wcm + Off::WCM_PLAYER_ARRAY + (uintptr_t)i * sizeof(uintptr_t);
+        uintptr_t slot_ptr = 0;
+        if (!SafeRead<uintptr_t>(slot_addr, &slot_ptr)) continue;
+        if (!LooksLikeUserPtrFast(slot_ptr)) continue;
+        uintptr_t chr_ins = 0;
+        if (!SafeRead<uintptr_t>(slot_ptr, &chr_ins)) continue;
+        if (!LooksLikeUserPtrFast(chr_ins)) continue;
+        friendlyPCs[friendlyCount++] = chr_ins;
+    }
+
+    int count = (int)(span_bytes / sizeof(uintptr_t));
+    int remaining = n_targets;
+
+    for (int i = 0; i < count && remaining > 0; ++i) {
+        uintptr_t slotPtr = begin + (uintptr_t)i * sizeof(uintptr_t);
+        uintptr_t chrIns = 0;
+        if (!SafeRead<uintptr_t>(slotPtr, &chrIns)) continue;
+        if (!LooksLikeUserPtrFast(chrIns)) continue;
+
+        // Friendly exclusion: never resolve a boss handle to a friendly PC.
+        bool friendly = false;
+        for (int j = 0; j < friendlyCount; ++j) {
+            if (chrIns == friendlyPCs[j]) { friendly = true; break; }
+        }
+        if (friendly) continue;
+
+        uint64_t h = 0;
+        if (!SafeRead<uint64_t>(chrIns + Off::CHR_INS_HANDLE, &h)) continue;
+        if (h == 0 || h == UINT64_MAX) continue;
+
+        // Check against all requested target handles. Break out once we've
+        // resolved every requested handle (early-exit when remaining==0).
+        for (int t = 0; t < n_targets; ++t) {
+            if (out_chr_ins[t] != 0) continue;          // already resolved
+            if (target_handles[t] == UINT64_MAX) continue;
+            if (target_handles[t] == h) {
+                out_chr_ins[t] = chrIns;
+                remaining -= 1;
+                break;
+            }
+        }
+    }
+}
+
+// Read the c-id (ChrIns +0x064). Returns the raw u32 value or 0 on read
+// failure. Caller validates the value via ResolveCidForLookup.
+static uint32_t ReadBossRawCid(uintptr_t boss_chr_ins) {
+    if (!boss_chr_ins) return 0;
+    uint32_t cid = 0;
+    if (!SafeRead<uint32_t>(boss_chr_ins + Off::CHR_INS_FIELD_64, &cid)) return 0;
+    return cid;
+}
+
+// Drive one predictor tick. Enumerates active bosses, reads each one's
+// state, and dispatches to the decision engine. Counters in/out via the
+// stats struct so the caller can log periodic summaries.
+struct PredictionTickStats {
+    int bosses_seen           = 0;
+    int bosses_read_ok        = 0;
+    int bosses_target_known   = 0;
+    int decisions_emitted     = 0;
+};
+
+static void RunPredictorTick(const PredictionConfig& engine_cfg,
+                             int64_t now_ms_rel,
+                             PredictionTickStats* stats) {
+    constexpr int MAX_BOSSES = Off::CS_FE_MAN_BOSS_BAR_COUNT;  // 3
+    uint64_t handles[MAX_BOSSES] = {0};
+    int nHandles = EnumerateActiveBossHandles(handles, MAX_BOSSES);
+    if (stats) stats->bosses_seen += nHandles;
+    if (nHandles == 0) return;
+
+    // Read player handle once per tick. If this fails, target filter cannot
+    // be applied; we still run the predictor with target_known=false.
+    uint64_t player_handle = 0;
+    bool have_player_handle = ReadLocalPlayerHandle(&player_handle);
+
+    // Single roster walk that resolves ALL boss handles at once. Replaces
+    // the per-boss roster walk that was 3× more expensive at 250Hz.
+    uintptr_t boss_chr_ins_arr[MAX_BOSSES] = {0};
+    ResolveBossHandlesBatch(handles, nHandles, boss_chr_ins_arr);
+
+    for (int b = 0; b < nHandles; ++b) {
+        uint64_t boss_handle = handles[b];
+        uintptr_t boss_chr_ins = boss_chr_ins_arr[b];
+        if (!boss_chr_ins) continue;  // can't read state, no decision
+
+        BossTickInput in;
+        in.boss_handle  = boss_handle;
+        in.boss_chr_ins = boss_chr_ins;
+        in.raw_cid      = ReadBossRawCid(boss_chr_ins);
+        if (!ReadBossAnimState(boss_chr_ins, &in.anim_id, &in.anim_time_s)) {
+            // No anim state — can't predict. Skip silently. The boss is
+            // present but TimeAct is unreadable this frame (mid-transition,
+            // unmapped, etc.). Try again next poll.
+            continue;
+        }
+        if (stats) stats->bosses_read_ok += 1;
+
+        // Target field. Filter-disabled callers just get target_match=false
+        // and target_known=false, but we still attempt the read so the
+        // decision log can include the value when target_filter is off
+        // (handy for offline analysis: "would the filter have suppressed?").
+        uint64_t boss_target = 0;
+        if (have_player_handle && ReadBossTargetHandle(boss_chr_ins, &boss_target)) {
+            in.target_known = true;
+            in.target_match = (boss_target == player_handle);
+            if (stats) stats->bosses_target_known += 1;
+        } else {
+            in.target_known = false;
+            in.target_match = false;
+        }
+
+        int emitted = EvaluatePredictionTick(in, engine_cfg, now_ms_rel);
+        if (stats) stats->decisions_emitted += emitted;
+    }
+}
+
 // ----- The worker thread main loop -----
 
 static DWORD WINAPI WorkerMain(LPVOID);
@@ -4225,6 +4590,36 @@ static DWORD WINAPI WorkerMain(LPVOID) {
 
     auto sessionStart = std::chrono::steady_clock::now().time_since_epoch();
     g_sessionStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(sessionStart).count();
+
+    // (d.1) Create shutdown event for waitable predictor sleep. Out of
+    // DllMain so loader-lock-adjacent allocations stay in worker context.
+    // Manual-reset so multiple wait sites all see the signal.
+    g_shutdownEvent = CreateEventW(nullptr, /*manual reset*/ TRUE,
+                                   /*initial state*/ FALSE, nullptr);
+    if (!g_shutdownEvent) {
+        BootLog("init_warn: CreateEvent failed (err=%lu); falling back to sleep_for",
+                GetLastError());
+    } else {
+        BootLog("shutdown_event: created");
+    }
+
+    // (d.2) Load parry DB (sibling to DLL). Fail-closed for CUES on error,
+    // not for the whole process — data-collection mode and the existing
+    // detour-arms path stay viable even if the predictor goes silent.
+    LoadParryDb();
+
+    // (d.3) Open prediction decision log if enabled. Reuses g_sessionTagPath
+    // for naming consistency with the other session artifacts: file is
+    // `<session>-<timestamp>.predictions.jsonl` alongside the .bin/.csv/.log.txt.
+    // Must run AFTER OpenSessionFiles() (which populates g_sessionTagPath).
+    if (g_cfg.prediction_decision_log_enabled) {
+        char pred_log_path[MAX_PATH] = {0};
+        _snprintf_s(pred_log_path, MAX_PATH, _TRUNCATE,
+                    "%s.predictions.jsonl", g_sessionTagPath);
+        // Non-fatal if open fails — predictor will still RUN, decisions
+        // just don't get persisted (writes are no-ops via g_predictionLogReady).
+        PredictionLogOpen(pred_log_path);
+    }
 
     // (e) ER FileVersion
     uint32_t major = 0, minor = 0, build = 0, patch = 0;
@@ -4292,27 +4687,43 @@ static DWORD WINAPI WorkerMain(LPVOID) {
     // (i) write session manifest
     WriteSessionManifest(major, minor, build, patch, g_roster, g_sessionStartMs);
 
-    // (j) install hook
+    // (j) install hook — ONLY if data_collection_mode is enabled.
+    // Phase 4.1 decoupling: the predictor doesn't need the detour. When
+    // shipping v0.1.0 (data_collection_mode=false default), we skip the
+    // hook entirely, reducing surface area and CPU cost.
+    InitQpc();
     extern bool InstallHook();
-    if (!InstallHook()) {
-        BootLog("init_fail: hook install");
-        LogF("init_fail: hook install");
-        while (g_running.load()) std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        BufferPoolFree();
-        CloseSessionFiles();
-        BootLogClose();
-        return 0;
+    if (g_cfg.data_collection_mode) {
+        if (!InstallHook()) {
+            BootLog("init_fail: hook install");
+            LogF("init_fail: hook install");
+            while (g_running.load()) std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            BufferPoolFree();
+            CloseSessionFiles();
+            BootLogClose();
+            return 0;
+        }
+        BootLog("hook: installed (data_collection_mode=true)");
+    } else {
+        BootLog("hook: skipped (data_collection_mode=false; predictor-only)");
     }
 
-    InitQpc();
-
-    // (k) F11 watcher
+    // (k) F11 watcher — only needed when data collection is active.
     extern DWORD WINAPI F11Thread(LPVOID);
-    g_f11Thread = CreateThread(nullptr, 0, F11Thread, nullptr, 0, nullptr);
+    if (g_cfg.data_collection_mode) {
+        g_f11Thread = CreateThread(nullptr, 0, F11Thread, nullptr, 0, nullptr);
+    } else {
+        BootLog("f11_thread: skipped (data_collection_mode=false)");
+    }
 
     g_initOk.store(true);
-    BootLog("READY: press F11 to arm/disarm sampling");
-    LogF("ready: armed via F11");
+    if (g_cfg.data_collection_mode) {
+        BootLog("READY: press F11 to arm/disarm sampling; predictor running in parallel");
+        LogF("ready: data_collection_mode=true; predictor running");
+    } else {
+        BootLog("READY: predictor running (data_collection_mode=false)");
+        LogF("ready: predictor-only mode");
+    }
 
     // Track when the user first arms, so we can warn at +30s in qualification
     // mode if check 7 (a boss-bar enemy appears in the roster) hasn't fired.
@@ -4320,11 +4731,23 @@ static DWORD WINAPI WorkerMain(LPVOID) {
     bool armedPrev = false;
     bool check7WarningEmitted = false;
 
-    // (l) steady state: drain queue + adaptive sampling monitor
+    // (l) steady state: drain queue + adaptive sampling monitor +
+    // PREDICTOR POLL. Predictor runs every prediction_poll_interval_ms;
+    // queue drain runs opportunistically alongside.
     int64_t flushDeadlineMs = g_sessionStartMs + 1000;
     int64_t adaptiveCheckMs = g_sessionStartMs + 1000;     // poll every 1s, but keep 5s rolling
     int currentStep = 0;
     int64_t recoveryStartMs = 0;
+
+    // Predictor cadence state.
+    const int   pred_poll_ms = g_cfg.prediction_poll_interval_ms;
+    int64_t     nextPredictMs = g_sessionStartMs;          // fire immediately on first iter
+    int64_t     nextGcMs      = g_sessionStartMs + 5000;   // every 5s prune g_bossLatch
+    PredictionConfig pred_engine_cfg{};
+    pred_engine_cfg.audio_cue_lead_ms      = g_cfg.audio_cue_lead_ms;
+    pred_engine_cfg.target_filter_enabled  = g_cfg.target_filter_enabled;
+    PredictionTickStats pred_stats{};
+    int64_t     predStatsLogMs = g_sessionStartMs + 5000;  // log summary every 5s
 
     // Rolling-window samples: 6 buckets × 1s each. Use index = (sec_since_start % 6).
     // Each bucket holds (drops, samples) at the END of that second. We compare
@@ -4377,6 +4800,9 @@ static DWORD WINAPI WorkerMain(LPVOID) {
             if (g_csvFile) fflush(g_csvFile);
             if (g_binFile) fflush(g_binFile);
             if (g_logFile) fflush(g_logFile);
+            if (g_cfg.prediction_decision_log_enabled) {
+                PredictionLogFlush();
+            }
             flushDeadlineMs = nowMs + 1000;
         }
         // Check 7 timeout (qualification mode only): if user has been armed
@@ -4446,8 +4872,51 @@ static DWORD WINAPI WorkerMain(LPVOID) {
             adaptiveCheckMs = nowMs + 1000;        // poll every second
         }
 
+        // Predictor tick — gated by prediction_enabled and cadence.
+        if (g_cfg.prediction_enabled && nowMs >= nextPredictMs) {
+            int64_t now_rel = nowMs - g_sessionStartMs;
+            RunPredictorTick(pred_engine_cfg, now_rel, &pred_stats);
+            // Schedule next tick. If we drifted (poll exceeded interval),
+            // catch up to nowMs+interval rather than chaining drift.
+            nextPredictMs = nowMs + pred_poll_ms;
+        }
+
+        // Per-tick GC of the boss latch map (cheap; only fires every 5s).
+        if (nowMs >= nextGcMs) {
+            GcBossLatch(nowMs - g_sessionStartMs);
+            nextGcMs = nowMs + 5000;
+        }
+
+        // Tick-stats summary (no flush yet — flush happens with the
+        // other logs at the 1s cadence below).
+        if (g_cfg.prediction_enabled && nowMs >= predStatsLogMs) {
+            LogF("predictor: bosses_seen=%d read_ok=%d target_known=%d decisions=%d (last 5s)",
+                 pred_stats.bosses_seen, pred_stats.bosses_read_ok,
+                 pred_stats.bosses_target_known, pred_stats.decisions_emitted);
+            pred_stats = PredictionTickStats{};
+            predStatsLogMs = nowMs + 5000;
+        }
+
+        // Wait until either the shutdown event fires or the next predictor
+        // tick is due. If queue work happened this iteration, skip the
+        // sleep (didWork=true) so we drain promptly.
         if (!didWork) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            int64_t sleep_ms;
+            if (g_cfg.prediction_enabled) {
+                int64_t until_next = nextPredictMs - nowMs;
+                sleep_ms = (until_next < 1) ? 1 : (until_next > 33 ? 33 : until_next);
+            } else {
+                sleep_ms = 2;  // legacy idle cadence when predictor off
+            }
+            if (g_shutdownEvent) {
+                DWORD wr = WaitForSingleObject(g_shutdownEvent, (DWORD)sleep_ms);
+                if (wr == WAIT_OBJECT_0) {
+                    // Signaled — break out of the steady loop promptly.
+                    break;
+                }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+            }
         }
     }
 
@@ -4469,10 +4938,20 @@ static DWORD WINAPI WorkerMain(LPVOID) {
          (unsigned long long)g_dropProducerEmerg.load(),
          (unsigned long long)g_truncatedSamples.load());
 
+    // Close prediction log before session files since it has its own
+    // critical section + handle.
+    PredictionLogClose();
+
     CloseSessionFiles();
     BootLog("worker exit");
     BootLogClose();
-    // Buffers released by DllMain detach if process is shutting down.
+
+    // NOTE: g_shutdownEvent is NOT closed here. Safe-leak to process exit
+    // matches the existing teardown model — DllMain may still SetEvent
+    // from the detach path, and closing the handle from worker while
+    // DllMain might call SetEvent is a cross-thread race on a plain
+    // HANDLE. The OS reaps the handle at process exit. (Codex flagged
+    // this at review; same fix pattern the buffer pool uses.)
     return 0;
 }
 
@@ -4625,7 +5104,12 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD reason, LPVOID) {
         }
         case DLL_PROCESS_DETACH: {
             g_running.store(false);
-            // Don't wait on threads inside DllMain (loader-lock hazard).
+            // Wake the worker if it's blocked in WaitForSingleObject so it
+            // exits the steady loop promptly. Best-effort signal only;
+            // don't wait on threads inside DllMain (loader-lock hazard).
+            if (g_shutdownEvent) {
+                SetEvent(g_shutdownEvent);
+            }
             if (g_workerThread) { CloseHandle(g_workerThread); g_workerThread = nullptr; }
             if (g_f11Thread)    { CloseHandle(g_f11Thread);    g_f11Thread = nullptr; }
             DebugBanner("DLL_PROCESS_DETACH (" PROBE_VERSION_STR ", safe-leak teardown)");
