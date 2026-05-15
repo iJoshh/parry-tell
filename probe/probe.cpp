@@ -65,6 +65,8 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <vector>
+#include <unordered_map>
 
 #include "MinHook.h"
 
@@ -679,6 +681,307 @@ static bool LoadConfig(const char* path, Config* cfg) {
     }
 
     return true;
+}
+
+// ===========================================================================
+// Parry-window database (loaded once at worker init from parry_data.bin)
+// ===========================================================================
+//
+// Binary format (little-endian; built by tools/build_parry_db.py):
+//
+//   HEADER:
+//     [magic 4 bytes: 'P''T''P''D']
+//     [version u16: 1]
+//     [meta_len u16: length of meta_json in bytes]
+//     [meta_json: utf8 bytes, length=meta_len]
+//
+//   BODY:
+//     [char_count u32]
+//     per char:
+//       [cid u32]              # e.g. 4310 for c4310
+//       [anim_count u32]
+//       per anim:
+//         [anim_id u32]        # full XXXYYYYYY decimal-concat OR short YYYYYY
+//         [window_count u16]
+//         per window:
+//           [open_s float32]
+//           [close_s float32]
+//
+// The build tool drops ambiguous short-form keys at build time (i.e. when
+// two distinct source anims would map to the same short YYYYYY u32). The
+// runtime predictor therefore reads raw anim_id from TimeAct +0xD0 and
+// looks it up directly — no per-character encoding detection needed at
+// runtime, by construction.
+//
+// Lookup key in g_parryDb: packed u64 = (resolved_cid << 32) | anim_id.
+// Resolved cid is the result of exact-first + single-step family fallback
+// applied at lookup time (not at build time).
+//
+// Lifetime: loaded once during worker init. Free on process exit only.
+// No mutation after load. Predictor reads concurrently without locking.
+// Failure to load is fail-closed for cues (g_parryDbLoaded stays false);
+// process keeps running so data-collection mode is unaffected.
+
+struct ParryWindow {
+    float open_s;
+    float close_s;
+};
+
+struct ParryDbMeta {
+    uint16_t version = 0;
+    char meta_json[8192] = {0};      // null-terminated; truncated if larger
+    uint32_t char_count = 0;
+    uint32_t total_anims = 0;
+    uint32_t total_windows = 0;
+};
+
+static std::unordered_map<uint64_t, std::vector<ParryWindow>> g_parryDb;
+static ParryDbMeta g_parryDbMeta;
+static std::atomic<bool> g_parryDbLoaded{false};
+
+static constexpr uint32_t PARRY_DB_MAGIC =
+    static_cast<uint32_t>('P') |
+    (static_cast<uint32_t>('T') << 8) |
+    (static_cast<uint32_t>('P') << 16) |
+    (static_cast<uint32_t>('D') << 24);
+static constexpr uint16_t PARRY_DB_VERSION = 1;
+
+// Pack (cid, anim_id) into the unordered_map key.
+static inline uint64_t PackParryKey(uint32_t cid, uint32_t anim_id) {
+    return (static_cast<uint64_t>(cid) << 32) | static_cast<uint64_t>(anim_id);
+}
+
+// Bounded byte reader used by the loader. Returns false on overflow.
+// On success, advances *pos by len.
+static bool ReadBytes(const uint8_t* buf, size_t buf_len, size_t* pos,
+                      void* dst, size_t len) {
+    if (!buf || !pos) return false;
+    if (*pos > buf_len) return false;
+    if (len > buf_len - *pos) return false;
+    memcpy(dst, buf + *pos, len);
+    *pos += len;
+    return true;
+}
+
+// Load parry_data.bin (sibling to the DLL). On success, atomically
+// publishes the parsed table via g_parryDb / g_parryDbMeta and sets
+// g_parryDbLoaded=true. On failure, logs the reason once and leaves the
+// previously-loaded state intact if any (fail-closed for cues — caller
+// observes the prior g_parryDbLoaded value).
+//
+// The function is single-shot in v1 (called once from worker init), but
+// the parse-into-locals-then-publish pattern keeps it correct if a
+// future reload feature reuses it.
+//
+// Returns true on success, false on any structural failure.
+static bool LoadParryDb() {
+    char path[MAX_PATH] = {0};
+    _snprintf_s(path, MAX_PATH, _TRUNCATE, "%sparry_data.bin", g_dllDir);
+
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") != 0 || !f) {
+        BootLog("parry_db_fail: cannot open %s (errno=%d)", path, errno);
+        return false;
+    }
+
+    // Slurp entire file (small — typical ~40 KB; cap defensively at 16 MB).
+    fseek(f, 0, SEEK_END);
+    long fsize_signed = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize_signed <= 0 || fsize_signed > (16 * 1024 * 1024)) {
+        BootLog("parry_db_fail: bad size %ld for %s", fsize_signed, path);
+        fclose(f);
+        return false;
+    }
+    size_t fsize = static_cast<size_t>(fsize_signed);
+
+    std::vector<uint8_t> buf(fsize);
+    size_t got = fread(buf.data(), 1, fsize, f);
+    fclose(f);
+    if (got != fsize) {
+        BootLog("parry_db_fail: short read %zu/%zu from %s", got, fsize, path);
+        return false;
+    }
+
+    size_t pos = 0;
+
+    // Parse into LOCAL temporaries; only publish to globals on full success.
+    // This keeps the prior g_parryDb intact if a future reload fails midway.
+    std::unordered_map<uint64_t, std::vector<ParryWindow>> tmp_db;
+    ParryDbMeta tmp_meta;
+
+    // Header: magic[4] version[u16] meta_len[u16]
+    uint32_t magic = 0;
+    uint16_t version = 0;
+    uint16_t meta_len = 0;
+    if (!ReadBytes(buf.data(), fsize, &pos, &magic, 4) ||
+        !ReadBytes(buf.data(), fsize, &pos, &version, 2) ||
+        !ReadBytes(buf.data(), fsize, &pos, &meta_len, 2)) {
+        BootLog("parry_db_fail: header truncated (fsize=%zu)", fsize);
+        return false;
+    }
+    if (magic != PARRY_DB_MAGIC) {
+        BootLog("parry_db_fail: bad magic 0x%08X (expected 'PTPD')", magic);
+        return false;
+    }
+    if (version != PARRY_DB_VERSION) {
+        BootLog("parry_db_fail: version %u != %u", (unsigned)version,
+                (unsigned)PARRY_DB_VERSION);
+        return false;
+    }
+
+    // Meta JSON (informational; copied for boot log + future provenance).
+    if (meta_len > 0) {
+        if (meta_len > sizeof(tmp_meta.meta_json) - 1) {
+            BootLog("parry_db_fail: meta_len %u exceeds buffer %zu",
+                    (unsigned)meta_len, sizeof(tmp_meta.meta_json) - 1);
+            return false;
+        }
+        if (!ReadBytes(buf.data(), fsize, &pos,
+                       tmp_meta.meta_json, meta_len)) {
+            BootLog("parry_db_fail: meta truncated");
+            return false;
+        }
+        tmp_meta.meta_json[meta_len] = '\0';
+    }
+    tmp_meta.version = version;
+
+    // Body: char_count + per-char + per-anim + per-window.
+    uint32_t char_count = 0;
+    if (!ReadBytes(buf.data(), fsize, &pos, &char_count, 4)) {
+        BootLog("parry_db_fail: char_count missing");
+        return false;
+    }
+    if (char_count > 10000) {
+        BootLog("parry_db_fail: char_count %u absurdly large", char_count);
+        return false;
+    }
+
+    // Reserve generously so we don't rehash mid-load. ~2000 anims expected.
+    tmp_db.reserve(4096);
+
+    uint32_t total_anims = 0;
+    uint32_t total_windows = 0;
+
+    for (uint32_t ci = 0; ci < char_count; ++ci) {
+        uint32_t cid = 0;
+        uint32_t anim_count = 0;
+        if (!ReadBytes(buf.data(), fsize, &pos, &cid, 4) ||
+            !ReadBytes(buf.data(), fsize, &pos, &anim_count, 4)) {
+            BootLog("parry_db_fail: char[%u] header truncated", ci);
+            return false;
+        }
+        if (anim_count > 100000) {
+            BootLog("parry_db_fail: char c%u anim_count %u absurdly large",
+                    cid, anim_count);
+            return false;
+        }
+
+        for (uint32_t ai = 0; ai < anim_count; ++ai) {
+            uint32_t anim_id = 0;
+            uint16_t window_count = 0;
+            if (!ReadBytes(buf.data(), fsize, &pos, &anim_id, 4) ||
+                !ReadBytes(buf.data(), fsize, &pos, &window_count, 2)) {
+                BootLog("parry_db_fail: c%u anim[%u] header truncated",
+                        cid, ai);
+                return false;
+            }
+            if (window_count == 0) {
+                // Defensive: build tool should not emit empty windows, but
+                // if it does, just skip the entry. Don't fail the whole load.
+                continue;
+            }
+
+            std::vector<ParryWindow> windows;
+            windows.reserve(window_count);
+            for (uint16_t wi = 0; wi < window_count; ++wi) {
+                ParryWindow w;
+                if (!ReadBytes(buf.data(), fsize, &pos, &w.open_s, 4) ||
+                    !ReadBytes(buf.data(), fsize, &pos, &w.close_s, 4)) {
+                    BootLog("parry_db_fail: c%u anim %u window[%u] truncated",
+                            cid, anim_id, (unsigned)wi);
+                    return false;
+                }
+                windows.push_back(w);
+            }
+
+            uint64_t key = PackParryKey(cid, anim_id);
+            // Build tool guarantees no duplicate (cid, anim_id) keys; if
+            // we somehow see one, log loudly so it surfaces at boot.
+            auto inserted = tmp_db.emplace(key, std::move(windows));
+            if (!inserted.second) {
+                BootLog("parry_db_warn: duplicate key c%u anim_id=%u "
+                        "(build tool bug?); keeping first",
+                        cid, anim_id);
+            } else {
+                total_anims += 1;
+                total_windows += window_count;
+            }
+        }
+    }
+
+    if (pos != fsize) {
+        BootLog("parry_db_warn: %zu trailing bytes after body (fsize=%zu)",
+                fsize - pos, fsize);
+        // Non-fatal: the lookup table is fully populated, the trailer is
+        // just an unrecognized appendix (probably a future format extension).
+    }
+
+    tmp_meta.char_count = char_count;
+    tmp_meta.total_anims = total_anims;
+    tmp_meta.total_windows = total_windows;
+
+    // PUBLISH: swap the parsed locals into the globals, then release-store
+    // the loaded flag. Readers that load the flag with acquire ordering
+    // will see fully-populated globals or nothing. The g_parryDb swap is
+    // O(1) (just swaps internal pointers) so the window between the two
+    // operations is minimal even though we don't claim an explicit lock.
+    g_parryDb.swap(tmp_db);
+    g_parryDbMeta = tmp_meta;
+    g_parryDbLoaded.store(true, std::memory_order_release);
+
+    BootLog("parry_db_ok: %s version=%u chars=%u anims=%u windows=%u meta_len=%u",
+            path, (unsigned)version, char_count, total_anims, total_windows,
+            (unsigned)meta_len);
+    return true;
+}
+
+// Lookup helper. resolved_cid is the exact-or-family-fallback cid that the
+// predictor computed for this boss. Returns nullptr if no row exists.
+// Caller MUST NOT mutate the returned vector — it's part of the read-only
+// table.
+static const std::vector<ParryWindow>* LookupParryWindows(uint32_t resolved_cid,
+                                                          uint32_t anim_id) {
+    if (!g_parryDbLoaded.load(std::memory_order_acquire)) return nullptr;
+    uint64_t key = PackParryKey(resolved_cid, anim_id);
+    auto it = g_parryDb.find(key);
+    if (it == g_parryDb.end()) return nullptr;
+    return &it->second;
+}
+
+// Resolve a raw c-id (read from ChrIns +0x064) to a lookup-ready resolved
+// c-id using exact-first + single-step family fallback. Returns 0 if the
+// raw cid is junk (< 1000) or if neither exact nor family-rounded cid is
+// present in the DB.
+//
+// Family fallback: round down to nearest 10 (e.g. c4311 -> c4310). Only
+// applied once; c9990 absent stays absent (no recursive fallback).
+static uint32_t ResolveCidForLookup(uint32_t raw_cid, uint32_t anim_id) {
+    if (raw_cid < 1000) return 0;
+    if (!g_parryDbLoaded.load(std::memory_order_acquire)) return 0;
+
+    // Exact match wins.
+    if (g_parryDb.find(PackParryKey(raw_cid, anim_id)) != g_parryDb.end()) {
+        return raw_cid;
+    }
+
+    // Family fallback: round down to nearest 10.
+    uint32_t family_cid = (raw_cid / 10) * 10;
+    if (family_cid == raw_cid) return 0;  // already aligned; no fallback path
+    if (g_parryDb.find(PackParryKey(family_cid, anim_id)) != g_parryDb.end()) {
+        return family_cid;
+    }
+    return 0;
 }
 
 // ===========================================================================

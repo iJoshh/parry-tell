@@ -57,7 +57,10 @@ from typing import Any
 
 MAGIC = b"PTPD"
 VERSION = 1
-META_MAX_BYTES = 8192
+# MUST match the C++ loader: probe/probe.cpp ParryDbMeta.meta_json is a
+# 8192-byte buffer that needs one byte for the null terminator. A larger
+# meta block would produce a .bin the runtime loader rejects.
+META_MAX_BYTES = 8191
 U32_MAX = (1 << 32) - 1
 
 
