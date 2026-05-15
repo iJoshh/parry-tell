@@ -1,7 +1,7 @@
 # HANDOFF — parry-tell-probe
 
 **Date:** 2026-05-15 (America/Chicago)
-**Session tag:** session-close/2026-05-15-<HHMMSS>
+**Session tag:** session-close/2026-05-15-140201
 **Branch:** main (clean working tree, 3 unpushed commits pending nightly cron)
 
 ---
@@ -143,7 +143,7 @@ Also refuted in prior sessions (preserved from PHASE4-PLAN.md):
 - **Branch:** main
 - **Working tree:** clean
 - **Unpushed commits:** 3 (nightly cron will push)
-- **Session-close tag:** session-close/2026-05-15-<HHMMSS>
+- **Session-close tag:** session-close/2026-05-15-140201
 - **Previous session-close tag:** cc322ac (2026-05-11)
 
 Recent commits:
