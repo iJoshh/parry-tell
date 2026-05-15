@@ -4312,6 +4312,35 @@ static bool ReadLocalPlayerHandle(uint64_t* out_handle) {
     return true;
 }
 
+// Read the local player's CURRENT LOCK-ON TARGET handle. Two-hop deref
+// like ReadLocalPlayerHandle, but reads from offset PLAYER_INS_LOCK_HANDLE_NEW
+// (+0x6B0) on the player ChrIns instead of CHR_INS_HANDLE (+0x008).
+//
+// Returns true and sets *out_handle on a clean read of a valid target.
+// Returns false if any deref fails OR the handle is the sentinel
+// (no current lock-on). The sentinel case is distinguished from
+// infrastructure failure so callers can apply hysteresis (e.g. "keep
+// the previous lock-on for 2-3 more ticks before declaring it gone").
+static bool ReadLocalPlayerLockOnHandle(uint64_t* out_handle) {
+    if (!out_handle) return false;
+    uintptr_t wcm = ReadWcm();
+    if (!wcm) return false;
+
+    uintptr_t player_slot = 0;
+    if (!SafeRead<uintptr_t>(wcm + Off::WCM_PLAYER_ARRAY, &player_slot)) return false;
+    if (!LooksLikeUserPtrFast(player_slot)) return false;
+
+    uintptr_t player_chr_ins = 0;
+    if (!SafeRead<uintptr_t>(player_slot, &player_chr_ins)) return false;
+    if (!LooksLikeUserPtrFast(player_chr_ins)) return false;
+
+    uint64_t h = 0;
+    if (!SafeRead<uint64_t>(player_chr_ins + Off::PLAYER_INS_LOCK_HANDLE_NEW, &h)) return false;
+    if (h == 0 || h == UINT64_MAX) return false;
+    *out_handle = h;
+    return true;
+}
+
 // Walk ChrIns → AIBag → AIStruct → +0xC988 (target FieldInsHandle).
 // Returns true and sets *out_handle on a clean walk. Returns false on any
 // dereference failure OR if the read FieldInsHandle is the sentinel
@@ -4372,10 +4401,232 @@ static bool ReadBossAnimState(uintptr_t boss_chr_ins,
     return true;
 }
 
-// Enumerate active boss-bar entries. Writes up to MAX_TRACKED_BOSSES handles
-// to out_handles. Returns the count actually populated (0..3). UINT64_MAX
-// and 0 are treated as "slot empty" and skipped.
-static int EnumerateActiveBossHandles(uint64_t* out_handles, int max_handles) {
+// ---------------------------------------------------------------------------
+// Predictor enumeration: roster-walk-first, boss-bar fallback (Phase 4.1.1)
+// ---------------------------------------------------------------------------
+//
+// The predictor's scope is "any hostile enemy with a parryable attack," not
+// just healthbar-bosses. The first implementation (Phase 4.1 commit 4) read
+// from CSFeManager's 3-slot boss-bar UI; that misses field enemies entirely.
+// The 2026-05-15 smoke test confirmed: the predictor ran for 5+ minutes,
+// fought a parryable field enemy, and emitted ZERO decisions because the
+// enemy never appeared in the boss-bar UI list. Fixed below.
+//
+// Primary enumerator: walks the WCM roster (same source the capture path
+// uses), excludes friendly PCs, returns up to N=MAX_PREDICTOR_TARGETS
+// non-friendly entries. The roster order is NOT "near-the-player first" —
+// the 4.1.2 diagnostic run confirmed Josh's locked-on enemy was past
+// position 16 every single tick, even though no enemies were closer.
+// To handle this, callers pass a `priority_handles` set (lock-on target
+// and boss-bar handles) that gets pinned to the front of the output
+// regardless of position in the roster (Phase 4.1.3). The 16-cap bounds
+// per-tick work — each entry triggers up to 4 SafeReads in the decision
+// engine; 16 * 4 = 64 reads/tick at 250 Hz = 16 KHz, well under budget.
+//
+// Fallback: when g_roster.enabled=false (roster validation failed at init),
+// fall back to the boss-bar reader. Better than zero coverage, and any
+// healthbar-boss fight (Margit, Godrick, etc.) still works in fallback mode.
+//
+// Friendly exclusion: the roster walk explicitly skips WCM_PLAYER_ARRAY
+// entries via two-hop deref (slot_addr → slot_ptr → ChrIns*). The boss-bar
+// fallback does NOT need friendly exclusion: boss-bars are by definition
+// hostile (no allied healthbars in the boss-bar UI).
+//
+// Co-op safety: every read is SafeRead-wrapped. No writes. On any failure
+// the entry is skipped; the predictor errs on suppress, not fire.
+
+constexpr int MAX_PREDICTOR_TARGETS = 16;
+
+// Shared helper: gather all friendly-PC ChrIns* (local player + Seamless
+// Coop friends, up to PLAYER_ARRAY_LEN=4). Two-hop deref: each slot in
+// WCM_PLAYER_ARRAY holds a SLOT POINTER, which itself must be dereffed
+// once to yield the player ChrIns*. Returns count written (0..4).
+//
+// Pre-Phase-4.1.1 this was duplicated inside ResolveBossHandlesBatch.
+// Hoisted here so both the enumerator and (future) other callers share
+// one implementation.
+static int GatherFriendlyPCs(uintptr_t wcm, uintptr_t* out_pcs, int max_pcs) {
+    if (!wcm || !out_pcs || max_pcs <= 0) return 0;
+    int cap = (max_pcs < Off::PLAYER_ARRAY_LEN) ? max_pcs : Off::PLAYER_ARRAY_LEN;
+    int n = 0;
+    for (int i = 0; i < cap; ++i) {
+        uintptr_t slot_addr = wcm + Off::WCM_PLAYER_ARRAY + (uintptr_t)i * sizeof(uintptr_t);
+        uintptr_t slot_ptr = 0;
+        if (!SafeRead<uintptr_t>(slot_addr, &slot_ptr)) continue;
+        if (!LooksLikeUserPtrFast(slot_ptr)) continue;
+        uintptr_t chr_ins = 0;
+        if (!SafeRead<uintptr_t>(slot_ptr, &chr_ins)) continue;
+        if (!LooksLikeUserPtrFast(chr_ins)) continue;
+        out_pcs[n++] = chr_ins;
+    }
+    return n;
+}
+
+// Primary enumerator. Walks the WCM roster once, returns paired
+// (handle, ChrIns*) entries for non-friendly enemies up to max_count.
+// Sets *out_skipped to the number of additional non-friendly enemies
+// encountered beyond max_count (so the caller can detect a capped fight).
+//
+// Phase 4.1.3: accepts a priority-handles array. Any enemy whose handle
+// matches an entry in priority_handles[] gets a GUARANTEED slot at the
+// front of the output, even if it would otherwise have been outside the
+// max_count cap. This fixes the "predictor never sees the locked-on
+// enemy because they're past position 16 in the roster" bug discovered
+// in the 4.1.2 diagnostic run.
+//
+// Priority entries that aren't found in the roster (handle stale or
+// enemy unloaded) DON'T consume slots — only matched-and-found priority
+// handles do. The remaining slots are filled with the first N non-priority
+// non-friendly entries encountered.
+//
+// Returns the number of entries written to out_handles/out_chr_ins.
+// On any infrastructure failure (WCM unreadable, roster bounds invalid,
+// span too large) returns 0 and the caller should fall back.
+static int WalkRosterEnemies(uint64_t* out_handles,
+                             uintptr_t* out_chr_ins,
+                             int max_count,
+                             const uint64_t* priority_handles,
+                             int n_priority,
+                             int* out_skipped) {
+    if (out_skipped) *out_skipped = 0;
+    if (!out_handles || !out_chr_ins || max_count <= 0) return 0;
+    for (int i = 0; i < max_count; ++i) { out_handles[i] = 0; out_chr_ins[i] = 0; }
+    if (!g_roster.enabled) return 0;
+
+    uintptr_t wcm = ReadWcm();
+    if (!wcm) return 0;
+
+    uintptr_t begin = 0, end = 0;
+    if (!SafeRead<uintptr_t>(wcm + Off::WCM_ROSTER_BEGIN, &begin)) return 0;
+    if (!SafeRead<uintptr_t>(wcm + Off::WCM_ROSTER_END,   &end))   return 0;
+    if (!begin || !end || end <= begin) return 0;
+
+    uintptr_t span_bytes = end - begin;
+    if (span_bytes > (uintptr_t)(2048 * sizeof(uintptr_t))) return 0;
+
+    uintptr_t friendlyPCs[Off::PLAYER_ARRAY_LEN] = {0};
+    int friendlyCount = GatherFriendlyPCs(wcm, friendlyPCs, Off::PLAYER_ARRAY_LEN);
+
+    int count = (int)(span_bytes / sizeof(uintptr_t));
+
+    // Two-buffer approach (Codex pass-3 redesign): walk the roster once,
+    // sort each matched entry into either the priority bucket or the
+    // fill bucket. After the walk, the priority bucket goes into the
+    // FRONT of out_handles[] (guaranteed inclusion for all matched
+    // priorities, in roster-encounter order), and the fill bucket
+    // contributes the remaining slots in roster order until max_count
+    // is reached. Non-priority entries that don't make the cut are
+    // counted as skipped.
+    //
+    // This replaces the in-place priority/eviction logic that took three
+    // Codex review passes to get correct. The two-buffer version has the
+    // invariant baked into the data structure rather than into careful
+    // index bookkeeping.
+    constexpr int PRIORITY_BUCKET_CAP = 8;
+    uint64_t  prio_h[PRIORITY_BUCKET_CAP] = {0};
+    uintptr_t prio_c[PRIORITY_BUCKET_CAP] = {0};
+    int n_prio = 0;
+    int effective_n_priority = (n_priority < PRIORITY_BUCKET_CAP)
+                             ? n_priority : PRIORITY_BUCKET_CAP;
+    bool priority_placed[PRIORITY_BUCKET_CAP] = {false, false, false, false,
+                                                 false, false, false, false};
+
+    // Fill bucket sized to max_count. Encounter order preserved. We collect
+    // up to `max_count` non-priority entries; surplus encounters are
+    // counted as skipped.
+    int  fill_cap = max_count;
+    uint64_t  fill_h[MAX_PREDICTOR_TARGETS] = {0};
+    uintptr_t fill_c[MAX_PREDICTOR_TARGETS] = {0};
+    int n_fill = 0;
+    int skipped = 0;
+
+    for (int i = 0; i < count; ++i) {
+        uintptr_t slotPtr = begin + (uintptr_t)i * sizeof(uintptr_t);
+        uintptr_t chrIns = 0;
+        if (!SafeRead<uintptr_t>(slotPtr, &chrIns)) continue;
+        if (!LooksLikeUserPtrFast(chrIns)) continue;
+
+        bool friendly = false;
+        for (int j = 0; j < friendlyCount; ++j) {
+            if (chrIns == friendlyPCs[j]) { friendly = true; break; }
+        }
+        if (friendly) continue;
+
+        uint64_t h = 0;
+        if (!SafeRead<uint64_t>(chrIns + Off::CHR_INS_HANDLE, &h)) continue;
+        if (h == 0 || h == UINT64_MAX) continue;
+
+        // Priority match? Each priority handle can match at most once;
+        // priority_placed[] tracks which have been claimed.
+        bool is_priority = false;
+        for (int p = 0; p < effective_n_priority; ++p) {
+            if (priority_placed[p]) continue;
+            uint64_t ph = priority_handles[p];
+            if (ph == 0 || ph == UINT64_MAX) continue;
+            if (ph == h) {
+                if (n_prio < PRIORITY_BUCKET_CAP) {
+                    prio_h[n_prio] = h;
+                    prio_c[n_prio] = chrIns;
+                    ++n_prio;
+                }
+                priority_placed[p] = true;
+                is_priority = true;
+                break;
+            }
+        }
+        if (is_priority) continue;
+
+        // Non-priority: fill bucket in encounter order, then skip surplus.
+        if (n_fill < fill_cap) {
+            fill_h[n_fill] = h;
+            fill_c[n_fill] = chrIns;
+            ++n_fill;
+        } else {
+            ++skipped;
+        }
+    }
+
+    // Merge: priorities first, then fill, capped at max_count. If the
+    // priority bucket alone is larger than max_count (defensive, won't
+    // happen with PRIORITY_BUCKET_CAP <= max_count), the surplus
+    // priorities are dropped and counted as skipped.
+    int n = 0;
+    int prio_to_emit = (n_prio < max_count) ? n_prio : max_count;
+    for (int i = 0; i < prio_to_emit; ++i) {
+        out_handles[n] = prio_h[i];
+        out_chr_ins[n] = prio_c[i];
+        ++n;
+    }
+    if (n_prio > prio_to_emit) {
+        skipped += (n_prio - prio_to_emit);
+    }
+    // Fill the remaining slots up to max_count from the fill bucket.
+    // Any non-priority entry that doesn't fit because priorities took
+    // its slot becomes skipped.
+    int fill_room = max_count - n;
+    int fill_to_emit = (n_fill < fill_room) ? n_fill : fill_room;
+    for (int i = 0; i < fill_to_emit; ++i) {
+        out_handles[n] = fill_h[i];
+        out_chr_ins[n] = fill_c[i];
+        ++n;
+    }
+    if (n_fill > fill_to_emit) {
+        skipped += (n_fill - fill_to_emit);
+    }
+
+    if (out_skipped) *out_skipped = skipped;
+    return n;
+}
+
+// Fallback enumerator: boss-bar UI (3-slot). Used when g_roster.enabled
+// is false (roster validation never succeeded). Friendly exclusion is
+// NOT required — the boss-bar UI by definition contains hostile entries
+// only (no allied healthbars). ChrIns* resolution still requires a
+// second-pass roster walk; if the roster is disabled, callers won't be
+// able to read anim state from these handles either. The fallback is
+// therefore only meaningful in the narrow window where roster validation
+// failed at init but recovered later (the F11 roster-recheck path).
+static int EnumerateBossBarHandles_Fallback(uint64_t* out_handles, int max_handles) {
     if (!out_handles || max_handles <= 0) return 0;
     if (!g_refs.csFeManPtrAddr) return 0;
 
@@ -4398,9 +4649,11 @@ static int EnumerateActiveBossHandles(uint64_t* out_handles, int max_handles) {
     return n;
 }
 
-// Build a per-tick map of {target_handles[]} → {ChrIns* or 0}. Single
-// roster walk; resolves all requested handles in one pass. This is the
-// shape RunPredictorTick uses now (one walk per tick, not one per boss).
+// Resolve a list of boss-bar handles to ChrIns* via a single roster walk.
+// Used only in the boss-bar fallback path; the primary enumerator
+// (WalkRosterEnemies) already returns ChrIns* directly. Kept around so
+// the fallback can still produce work even when only the boss-bar UI
+// has handles for us.
 //
 // Inputs:
 //   target_handles[] — up to N FieldInsHandles to resolve (UINT64_MAX
@@ -4429,21 +4682,8 @@ static void ResolveBossHandlesBatch(const uint64_t* target_handles,
     uintptr_t span_bytes = end - begin;
     if (span_bytes > (uintptr_t)(2048 * sizeof(uintptr_t))) return;
 
-    // Gather friendly PCs once. Two-hop deref: WCM_PLAYER_ARRAY[i] holds
-    // a slot pointer that must be dereferenced once more to yield the
-    // player ChrIns*.
     uintptr_t friendlyPCs[Off::PLAYER_ARRAY_LEN] = {0};
-    int friendlyCount = 0;
-    for (int i = 0; i < Off::PLAYER_ARRAY_LEN; ++i) {
-        uintptr_t slot_addr = wcm + Off::WCM_PLAYER_ARRAY + (uintptr_t)i * sizeof(uintptr_t);
-        uintptr_t slot_ptr = 0;
-        if (!SafeRead<uintptr_t>(slot_addr, &slot_ptr)) continue;
-        if (!LooksLikeUserPtrFast(slot_ptr)) continue;
-        uintptr_t chr_ins = 0;
-        if (!SafeRead<uintptr_t>(slot_ptr, &chr_ins)) continue;
-        if (!LooksLikeUserPtrFast(chr_ins)) continue;
-        friendlyPCs[friendlyCount++] = chr_ins;
-    }
+    int friendlyCount = GatherFriendlyPCs(wcm, friendlyPCs, Off::PLAYER_ARRAY_LEN);
 
     int count = (int)(span_bytes / sizeof(uintptr_t));
     int remaining = n_targets;
@@ -4488,23 +4728,129 @@ static uint32_t ReadBossRawCid(uintptr_t boss_chr_ins) {
     return cid;
 }
 
-// Drive one predictor tick. Enumerates active bosses, reads each one's
-// state, and dispatches to the decision engine. Counters in/out via the
-// stats struct so the caller can log periodic summaries.
+// Drive one predictor tick. Enumerates active enemies (roster-walk-first,
+// boss-bar fallback), reads each one's state, and dispatches to the decision
+// engine. Counters in/out via the stats struct so the caller can log
+// periodic summaries.
+//
+// Phase 4.1.1: enumeration source switched from boss-bar UI to WCM roster.
+// bosses_seen now means "enemies enumerated this tick" (capped at
+// MAX_PREDICTOR_TARGETS). bosses_enumerated_skipped tracks how many extra
+// non-friendly enemies were skipped due to the cap, so we can detect a
+// horde fight bumping into the budget ceiling.
+//
+// Phase 4.1.2 diagnostics: added per-failure-mode counters so we can tell
+// the difference between "ReadBossAnimState failed" vs "succeeded but
+// returned anim_id=0" vs "succeeded with a valid anim_id but no DB match"
+// without relying on the rate-limited JSONL row count.
 struct PredictionTickStats {
-    int bosses_seen           = 0;
-    int bosses_read_ok        = 0;
-    int bosses_target_known   = 0;
-    int decisions_emitted     = 0;
+    int bosses_seen                  = 0;
+    int bosses_read_ok               = 0;
+    int bosses_target_known          = 0;
+    int decisions_emitted            = 0;
+    int bosses_enumerated_skipped    = 0;
+
+    // Diagnostic stage breakdown (4.1.2):
+    int read_fail_anim               = 0;   // ReadBossAnimState returned false
+    int read_zero_anim_id            = 0;   // success but anim_id == 0
+    int read_zero_anim_time          = 0;   // success but anim_time_s == 0.0
+    int read_nonzero_both            = 0;   // both anim_id and anim_time nonzero
 };
+
+// Phase 4.1.3: priority-handle bookkeeping for the predictor's roster
+// enumeration. The "must-include" set is the union of the player's
+// current lock-on target (if any) and the active boss-bar handles. These
+// handles are always pinned to the front of the predictor's per-tick
+// output, regardless of where they sit in the WCM roster.
+//
+// Lock-on hysteresis: the lock-on field can transiently read as the
+// sentinel (UINT64_MAX) during target-switch frames. To avoid kicking
+// the player's target out of the priority set across single-frame
+// blips, we remember the last-valid lock-on handle for up to
+// LOCKON_STICKY_TICKS predictor ticks after the sentinel appears.
+//
+// Both fields live at file scope so they persist between predictor
+// ticks. Worker-thread access only — no atomic needed because the
+// predictor is single-threaded.
+static constexpr int LOCKON_STICKY_TICKS = 3;
+static uint64_t g_predictor_last_lockon = UINT64_MAX;
+static int      g_predictor_lockon_sticky_remaining = 0;
 
 static void RunPredictorTick(const PredictionConfig& engine_cfg,
                              int64_t now_ms_rel,
                              PredictionTickStats* stats) {
-    constexpr int MAX_BOSSES = Off::CS_FE_MAN_BOSS_BAR_COUNT;  // 3
-    uint64_t handles[MAX_BOSSES] = {0};
-    int nHandles = EnumerateActiveBossHandles(handles, MAX_BOSSES);
-    if (stats) stats->bosses_seen += nHandles;
+    uint64_t  handles[MAX_PREDICTOR_TARGETS] = {0};
+    uintptr_t boss_chr_ins_arr[MAX_PREDICTOR_TARGETS] = {0};
+    int nHandles = 0;
+    int skipped = 0;
+
+    // Build the priority-handles set BEFORE enumeration. Capacity matches
+    // the static `priority_placed[8]` cap in WalkRosterEnemies.
+    uint64_t priority_handles[8] = {0};
+    int n_priority = 0;
+
+    // (1) Lock-on target with hysteresis.
+    uint64_t lockon_now = 0;
+    if (ReadLocalPlayerLockOnHandle(&lockon_now)) {
+        g_predictor_last_lockon = lockon_now;
+        g_predictor_lockon_sticky_remaining = LOCKON_STICKY_TICKS;
+        priority_handles[n_priority++] = lockon_now;
+    } else if (g_predictor_lockon_sticky_remaining > 0 &&
+               g_predictor_last_lockon != UINT64_MAX) {
+        priority_handles[n_priority++] = g_predictor_last_lockon;
+        g_predictor_lockon_sticky_remaining -= 1;
+    } else {
+        g_predictor_last_lockon = UINT64_MAX;
+    }
+
+    // (2) Boss-bar handles (up to 3, always hostile). Dedupe against
+    // lock-on entry. Reuse the existing boss-bar reader.
+    uint64_t bossbar_handles[3] = {0};
+    int n_bossbar = EnumerateBossBarHandles_Fallback(bossbar_handles, 3);
+    for (int i = 0; i < n_bossbar && n_priority < 8; ++i) {
+        uint64_t bh = bossbar_handles[i];
+        if (bh == 0 || bh == UINT64_MAX) continue;
+        // Skip dup against lock-on slot(s) already in priority_handles[].
+        bool dup = false;
+        for (int p = 0; p < n_priority; ++p) {
+            if (priority_handles[p] == bh) { dup = true; break; }
+        }
+        if (dup) continue;
+        priority_handles[n_priority++] = bh;
+    }
+
+    // Primary path: walk the WCM roster once, get paired (handle, ChrIns*)
+    // entries for non-friendly enemies. The walk inherently resolves the
+    // handle→ChrIns* mapping, so no second roster pass is needed. Priority
+    // handles are pinned to the front of the output (Phase 4.1.3).
+    if (g_roster.enabled) {
+        nHandles = WalkRosterEnemies(handles, boss_chr_ins_arr,
+                                     MAX_PREDICTOR_TARGETS,
+                                     priority_handles, n_priority,
+                                     &skipped);
+    }
+
+    // Fallback path: primary returned zero entries (either roster disabled
+    // at init OR transient WCM read failure on this tick). Try the
+    // boss-bar UI as a degraded path. When the roster IS enabled but the
+    // walker returned 0 anyway, ResolveBossHandlesBatch can still succeed
+    // because it does its own SafeRead pass on the roster pointers — they
+    // may have become readable in the few microseconds since the primary
+    // walk. When the roster is genuinely disabled the batch walker returns
+    // empty out_chr_ins[] and the predictor sees bosses_seen>0 but
+    // bosses_read_ok=0; logged via the periodic stats line.
+    if (nHandles == 0) {
+        nHandles = EnumerateBossBarHandles_Fallback(handles,
+                                                    MAX_PREDICTOR_TARGETS);
+        if (nHandles > 0) {
+            ResolveBossHandlesBatch(handles, nHandles, boss_chr_ins_arr);
+        }
+    }
+
+    if (stats) {
+        stats->bosses_seen += nHandles;
+        stats->bosses_enumerated_skipped += skipped;
+    }
     if (nHandles == 0) return;
 
     // Read player handle once per tick. If this fails, target filter cannot
@@ -4512,10 +4858,34 @@ static void RunPredictorTick(const PredictionConfig& engine_cfg,
     uint64_t player_handle = 0;
     bool have_player_handle = ReadLocalPlayerHandle(&player_handle);
 
-    // Single roster walk that resolves ALL boss handles at once. Replaces
-    // the per-boss roster walk that was 3× more expensive at 250Hz.
-    uintptr_t boss_chr_ins_arr[MAX_BOSSES] = {0};
-    ResolveBossHandlesBatch(handles, nHandles, boss_chr_ins_arr);
+    // Phase 4.1.2 diagnostic: once per second, dump a per-enemy line so we
+    // can see directly which (cid, anim_id, anim_time) tuples are flowing
+    // through the predictor. Decoupled from the rate-limited decision log.
+    // Throttle via the now_ms_rel parameter: fire when the prior fire was
+    // >=1000 ms ago. Each fire emits up to 4 lines (16 enemies / 4 per
+    // line) to keep log lines under reasonable width.
+    static int64_t lastEnemyDumpMs = -1000000;
+    bool doDump = (now_ms_rel - lastEnemyDumpMs) >= 1000;
+    if (doDump) lastEnemyDumpMs = now_ms_rel;
+
+    // Dump buffer for the 1Hz per-enemy snapshot (filled while iterating;
+    // emitted as a single LogF call at the end). Phase 4.1.3 adds a
+    // "lockon=<handle suffix>" hint so we can confirm the priority path
+    // is delivering the locked-on enemy into the predictor's working set.
+    char dumpBuf[1024];
+    int  dumpLen = 0;
+    if (doDump) {
+        // Show low 16 bits of lockon for compactness (full 64-bit is noise
+        // in the log; the low bits uniquely distinguish handles per session).
+        uint16_t lockon_tag = (uint16_t)(g_predictor_last_lockon & 0xFFFFu);
+        bool have_lockon = (g_predictor_lockon_sticky_remaining > 0) &&
+                           (g_predictor_last_lockon != UINT64_MAX);
+        dumpLen = _snprintf_s(dumpBuf, sizeof(dumpBuf), _TRUNCATE,
+                              "predictor_snap: n=%d prio=%d lockon=%s/%04x",
+                              nHandles, n_priority,
+                              have_lockon ? "yes" : "no", lockon_tag);
+        if (dumpLen < 0) dumpLen = 0;
+    }
 
     for (int b = 0; b < nHandles; ++b) {
         uint64_t boss_handle = handles[b];
@@ -4526,13 +4896,37 @@ static void RunPredictorTick(const PredictionConfig& engine_cfg,
         in.boss_handle  = boss_handle;
         in.boss_chr_ins = boss_chr_ins;
         in.raw_cid      = ReadBossRawCid(boss_chr_ins);
-        if (!ReadBossAnimState(boss_chr_ins, &in.anim_id, &in.anim_time_s)) {
+        bool anim_ok = ReadBossAnimState(boss_chr_ins, &in.anim_id, &in.anim_time_s);
+
+        if (doDump && dumpLen >= 0 && dumpLen < (int)sizeof(dumpBuf) - 1) {
+            // Append "cid:aid:t" or "cid:FAIL" for this entry.
+            int n;
+            if (anim_ok) {
+                n = _snprintf_s(dumpBuf + dumpLen, sizeof(dumpBuf) - dumpLen,
+                                _TRUNCATE, " %u/%u/%.2f", in.raw_cid,
+                                in.anim_id, in.anim_time_s);
+            } else {
+                n = _snprintf_s(dumpBuf + dumpLen, sizeof(dumpBuf) - dumpLen,
+                                _TRUNCATE, " %u/FAIL", in.raw_cid);
+            }
+            if (n > 0) dumpLen += n;
+        }
+
+        if (!anim_ok) {
             // No anim state — can't predict. Skip silently. The boss is
             // present but TimeAct is unreadable this frame (mid-transition,
             // unmapped, etc.). Try again next poll.
+            if (stats) stats->read_fail_anim += 1;
             continue;
         }
-        if (stats) stats->bosses_read_ok += 1;
+        if (stats) {
+            stats->bosses_read_ok += 1;
+            bool aid_zero = (in.anim_id == 0);
+            bool at_zero  = (in.anim_time_s == 0.0f);
+            if (aid_zero) stats->read_zero_anim_id += 1;
+            if (at_zero)  stats->read_zero_anim_time += 1;
+            if (!aid_zero && !at_zero) stats->read_nonzero_both += 1;
+        }
 
         // Target field. Filter-disabled callers just get target_match=false
         // and target_known=false, but we still attempt the read so the
@@ -4550,6 +4944,10 @@ static void RunPredictorTick(const PredictionConfig& engine_cfg,
 
         int emitted = EvaluatePredictionTick(in, engine_cfg, now_ms_rel);
         if (stats) stats->decisions_emitted += emitted;
+    }
+
+    if (doDump && dumpLen > 0) {
+        LogF("%s", dumpBuf);
     }
 }
 
@@ -4890,9 +5288,17 @@ static DWORD WINAPI WorkerMain(LPVOID) {
         // Tick-stats summary (no flush yet — flush happens with the
         // other logs at the 1s cadence below).
         if (g_cfg.prediction_enabled && nowMs >= predStatsLogMs) {
-            LogF("predictor: bosses_seen=%d read_ok=%d target_known=%d decisions=%d (last 5s)",
+            LogF("predictor: bosses_seen=%d read_ok=%d target_known=%d decisions=%d skipped=%d (last 5s)",
                  pred_stats.bosses_seen, pred_stats.bosses_read_ok,
-                 pred_stats.bosses_target_known, pred_stats.decisions_emitted);
+                 pred_stats.bosses_target_known, pred_stats.decisions_emitted,
+                 pred_stats.bosses_enumerated_skipped);
+            // Phase 4.1.2 diagnostic: stage-breakdown of ReadBossAnimState
+            // outcomes. Helps distinguish "TimeAct unreadable" (read_fail)
+            // from "TimeAct readable but anim_id==0" (read_zero_*) from
+            // "got real data" (read_nonzero_both). All sum to bosses_seen.
+            LogF("predictor_diag: read_fail=%d aid_zero=%d t_zero=%d nonzero_both=%d (last 5s)",
+                 pred_stats.read_fail_anim, pred_stats.read_zero_anim_id,
+                 pred_stats.read_zero_anim_time, pred_stats.read_nonzero_both);
             pred_stats = PredictionTickStats{};
             predStatsLogMs = nowMs + 5000;
         }
