@@ -67,6 +67,7 @@
 #include <thread>
 #include <vector>
 #include <unordered_map>
+#include <cmath>
 
 #include "MinHook.h"
 
@@ -982,6 +983,652 @@ static uint32_t ResolveCidForLookup(uint32_t raw_cid, uint32_t anim_id) {
         return family_cid;
     }
     return 0;
+}
+
+// ===========================================================================
+// Predictor decision engine (latch state machine + lead-time math)
+// ===========================================================================
+//
+// Phase 4.1 commit 3. Pure C++ — no game-memory reads, no file I/O. The
+// caller (predictor worker tick, landing in commit 4) gathers boss state
+// from SEH-wrapped reads, then hands the numbers to EvaluatePredictionTick.
+// The engine produces a PredictionDecision per (boss, window) eval and
+// updates per-boss latch state. The decision-log writer (further down) is
+// the only side-effect path.
+//
+// Latch identity is (boss_handle, anim_instance_seq, window_ordinal). The
+// anim_instance_seq counter increments per boss whenever ANY of these
+// trigger a "this is a new instance of the animation" condition:
+//
+//   - resolved c-id changed (boss got recategorized; rare but possible)
+//   - anim_id changed (confirmed after 2-poll debounce against flicker)
+//   - anim_time rewound by more than 50 ms (same-anim re-entry case, e.g.
+//     Margit's bonk-with-staff played twice in a row)
+//   - boss handle disappeared from boss bars for > 250 ms grace and came back
+//
+// On any instance reset, consumed_windows bitmap is cleared so the new
+// instance can cue fresh.
+//
+// Threading: this engine runs entirely on the predictor worker thread.
+// Per-boss state lives in g_bossLatch (single-thread access from worker).
+// No locks needed because no other thread reads it. The parry DB IS
+// shared (predictor reads, init writes), and that synchronization is
+// already handled by g_parryDbLoaded acquire/release.
+
+static constexpr int BOSS_DISAPPEAR_GRACE_MS = 250;
+static constexpr float ANIM_REWIND_TOLERANCE_S = 0.050f;
+static constexpr int ANIM_ID_DEBOUNCE_POLLS = 2;
+static constexpr int MAX_WINDOWS_PER_ANIM_LATCH = 32;   // uint32_t bitmap
+
+// Per-boss latch state. Keyed by boss FieldInsHandle in g_bossLatch.
+struct BossPredictState {
+    uint32_t resolved_cid       = 0;
+    uint32_t prev_anim_id       = 0;      // last anim_id we believed was active
+    float    prev_anim_time_s   = 0.0f;
+
+    // Debounce: when a new anim_id first appears, we tentatively note it
+    // here. It becomes prev_anim_id once observed for N consecutive polls.
+    uint32_t pending_anim_id    = 0;
+    uint8_t  pending_count      = 0;
+
+    // Monotonic instance counter for THIS boss handle. Bumps on each
+    // confirmed instance reset; never decreases. Combined with the boss
+    // handle + window ordinal, uniquely identifies a parry window
+    // opportunity for latch purposes.
+    uint64_t anim_instance_seq  = 0;
+
+    // Consumed bitmap for the CURRENT (anim_instance_seq) instance.
+    // Bit i = "we have already emitted a cue for windows[i] this instance."
+    // Cleared on instance reset.
+    uint32_t consumed_windows   = 0;
+
+    int64_t  last_seen_ms       = 0;      // session-relative ms; 0 = never
+    bool     ever_seen          = false;
+};
+
+// Keyed by boss FieldInsHandle (u64). Single-thread access from predictor.
+static std::unordered_map<uint64_t, BossPredictState> g_bossLatch;
+
+// Result of one (boss, window) evaluation. The engine produces a sequence
+// of these per tick and the decision-log writer serializes them.
+//
+// `action` enum semantics:
+//   ACTION_NO_DB      — DB not loaded (predictor inert)
+//   ACTION_NO_KEY     — (cid, anim_id) lookup returned no row
+//   ACTION_BEFORE_LEAD — lead_time still bigger than configured threshold
+//   ACTION_FIRE       — cue should fire (predictor would call PlaySoundW)
+//   ACTION_LATCHED    — already fired for this (instance, window)
+//   ACTION_LATE_TARGET_SWITCH — target switched to player after threshold
+//                              crossed; fire NOW (per plan target-switch rule)
+//   ACTION_LATE_INSIDE_WINDOW — anim_time is inside [open, close]; cue
+//                              window is open; fire if not latched
+//   ACTION_SUPPRESSED_TARGET — target_match=false and target_filter on
+//   ACTION_SUPPRESSED_POST_WINDOW — anim_time past window close
+//   ACTION_SUPPRESSED_NEGATIVE_LEAD_EXCEEDS_WINDOW —
+//                              audio_cue_lead_ms < 0 and target fire-time
+//                              > window_close_s (window too short for the
+//                              configured delay)
+enum PredictionAction : uint8_t {
+    ACTION_NO_DB                = 0,
+    ACTION_NO_KEY               = 1,
+    ACTION_BEFORE_LEAD          = 2,
+    ACTION_FIRE                 = 3,
+    ACTION_LATCHED              = 4,
+    ACTION_LATE_TARGET_SWITCH   = 5,
+    ACTION_LATE_INSIDE_WINDOW   = 6,
+    ACTION_SUPPRESSED_TARGET    = 7,
+    ACTION_SUPPRESSED_POST_WINDOW       = 8,
+    ACTION_SUPPRESSED_NEGATIVE_LEAD_EXCEEDS_WINDOW = 9,
+};
+
+static const char* PredictionActionName(PredictionAction a) {
+    switch (a) {
+        case ACTION_NO_DB:                              return "no_db";
+        case ACTION_NO_KEY:                             return "no_key";
+        case ACTION_BEFORE_LEAD:                        return "before_lead";
+        case ACTION_FIRE:                               return "fire";
+        case ACTION_LATCHED:                            return "latched";
+        case ACTION_LATE_TARGET_SWITCH:                 return "fire_late_target_switch";
+        case ACTION_LATE_INSIDE_WINDOW:                 return "fire_late_inside_window";
+        case ACTION_SUPPRESSED_TARGET:                  return "suppressed_target";
+        case ACTION_SUPPRESSED_POST_WINDOW:             return "suppressed_post_window";
+        case ACTION_SUPPRESSED_NEGATIVE_LEAD_EXCEEDS_WINDOW:
+                                                        return "suppressed_negative_lead_exceeds_window";
+    }
+    return "unknown";
+}
+
+struct PredictionDecision {
+    int64_t  ts_ms_rel              = 0;     // session-relative poll time
+    uint64_t boss_handle            = 0;
+    uintptr_t boss_chr_ins          = 0;
+    uint32_t raw_cid                = 0;
+    uint32_t resolved_cid           = 0;     // 0 if no DB row
+    uint32_t anim_id                = 0;
+    float    anim_time_s            = 0.0f;
+    uint16_t window_ordinal         = 0xFFFF; // 0xFFFF if no specific window
+    float    window_open_s          = 0.0f;
+    float    window_close_s         = 0.0f;
+    float    lead_time_ms           = 0.0f;
+    int      configured_lead_ms     = 0;
+    bool     target_filter_enabled  = false;
+    bool     target_match           = false;
+    uint64_t anim_instance_seq      = 0;
+    PredictionAction action         = ACTION_NO_KEY;
+};
+
+// Configuration that the engine reads each tick. Populated from g_cfg by
+// the worker before calling EvaluatePredictionTick. Kept as a small POD
+// so the engine has no implicit dependency on Config struct layout
+// (decouples engine from INI surface for unit-testing).
+struct PredictionConfig {
+    int  audio_cue_lead_ms      = 0;       // [-200, 500]
+    bool target_filter_enabled  = false;
+};
+
+// Per-boss tick input. Caller assembles this from one boss-bar entry.
+struct BossTickInput {
+    uint64_t  boss_handle    = 0;
+    uintptr_t boss_chr_ins   = 0;          // for logging only
+    uint32_t  raw_cid        = 0;          // ChrIns +0x064
+    uint32_t  anim_id        = 0;          // TimeAct +0xD0
+    float     anim_time_s    = 0.0f;       // TimeAct +0x24
+    bool      target_match   = false;      // boss targeting player?
+    bool      target_known   = false;      // false if target read failed
+};
+
+// Forward decl — decision sink defined further down.
+static void WritePredictionDecision(const PredictionDecision& d);
+
+// Drop state entries for bosses we haven't seen in a LONG time
+// (10 seconds). Keeps the map small. Called from the worker periodically.
+static void GcBossLatch(int64_t now_ms_rel) {
+    constexpr int64_t GC_AGE_MS = 10000;
+    for (auto it = g_bossLatch.begin(); it != g_bossLatch.end(); ) {
+        if (it->second.ever_seen &&
+            (now_ms_rel - it->second.last_seen_ms) > GC_AGE_MS) {
+            it = g_bossLatch.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// Core latch transition: given the prior state and current tick observation,
+// decide whether this is a NEW animation instance (and if so, increment the
+// seq and clear the consumed-windows bitmap). Returns true if an instance
+// reset happened.
+static bool BumpInstanceSeqIfNeeded(BossPredictState* st,
+                                    uint32_t resolved_cid,
+                                    uint32_t anim_id,
+                                    float anim_time_s,
+                                    int64_t now_ms_rel) {
+    if (!st->ever_seen) {
+        st->resolved_cid = resolved_cid;
+        st->prev_anim_id = anim_id;
+        st->prev_anim_time_s = anim_time_s;
+        st->anim_instance_seq = 1;
+        st->consumed_windows = 0;
+        st->last_seen_ms = now_ms_rel;
+        st->ever_seen = true;
+        st->pending_anim_id = 0;
+        st->pending_count = 0;
+        return true;
+    }
+
+    bool reset = false;
+
+    // (1) Disappearance > grace: previous last_seen_ms is more than
+    // BOSS_DISAPPEAR_GRACE_MS old. (We never get here if the boss vanished
+    // permanently — GcBossLatch reaps and the next sighting is fresh.)
+    if ((now_ms_rel - st->last_seen_ms) > BOSS_DISAPPEAR_GRACE_MS) {
+        reset = true;
+    }
+
+    // (2) Resolved c-id changed.
+    if (resolved_cid != 0 && resolved_cid != st->resolved_cid) {
+        reset = true;
+    }
+
+    // (3) anim_id changed (with debounce). If the new anim_id is stable
+    // for ANIM_ID_DEBOUNCE_POLLS consecutive polls, that's a real change.
+    // Otherwise it's flicker — ignore.
+    if (anim_id != st->prev_anim_id) {
+        if (anim_id == st->pending_anim_id) {
+            st->pending_count += 1;
+            if (st->pending_count >= ANIM_ID_DEBOUNCE_POLLS) {
+                reset = true;
+                st->pending_anim_id = 0;
+                st->pending_count = 0;
+            }
+        } else {
+            st->pending_anim_id = anim_id;
+            st->pending_count = 1;
+        }
+    } else {
+        // Same anim as before — clear any pending debounce candidate.
+        st->pending_anim_id = 0;
+        st->pending_count = 0;
+    }
+
+    // (4) anim_time rewind > tolerance on same anim_id. Handles
+    // same-anim re-entry (e.g. boss does anim_X, finishes, does anim_X
+    // again without a different anim in between).
+    if (anim_id == st->prev_anim_id) {
+        float dt = st->prev_anim_time_s - anim_time_s;
+        if (dt > ANIM_REWIND_TOLERANCE_S) {
+            reset = true;
+        }
+    }
+
+    if (reset) {
+        st->resolved_cid = resolved_cid;
+        st->prev_anim_id = anim_id;
+        st->prev_anim_time_s = anim_time_s;
+        st->anim_instance_seq += 1;
+        st->consumed_windows = 0;
+    } else {
+        // Same instance — just update progress trackers.
+        st->prev_anim_time_s = anim_time_s;
+        // prev_anim_id stays as the believed-active anim until debounce
+        // promotes pending_anim_id; we DON'T overwrite it with this
+        // tick's anim_id if it differs (that would defeat the debounce).
+    }
+
+    st->last_seen_ms = now_ms_rel;
+    return reset;
+}
+
+// Evaluate one window for one boss. Returns the decision; does not write
+// it. Caller writes (allowing test harnesses to capture decisions in-mem).
+static PredictionDecision EvaluatePredictionWindow(
+        BossPredictState* st,
+        const BossTickInput& in,
+        const PredictionConfig& cfg,
+        const ParryWindow& window,
+        uint16_t window_ordinal,
+        int64_t now_ms_rel) {
+    PredictionDecision d;
+    d.ts_ms_rel             = now_ms_rel;
+    d.boss_handle           = in.boss_handle;
+    d.boss_chr_ins          = in.boss_chr_ins;
+    d.raw_cid               = in.raw_cid;
+    d.resolved_cid          = st->resolved_cid;
+    d.anim_id               = in.anim_id;
+    d.anim_time_s           = in.anim_time_s;
+    d.window_ordinal        = window_ordinal;
+    d.window_open_s         = window.open_s;
+    d.window_close_s        = window.close_s;
+    d.lead_time_ms          = (window.open_s - in.anim_time_s) * 1000.0f;
+    d.configured_lead_ms    = cfg.audio_cue_lead_ms;
+    d.target_filter_enabled = cfg.target_filter_enabled;
+    d.target_match          = in.target_match;
+    d.anim_instance_seq     = st->anim_instance_seq;
+
+    // Bitmap bounds: skip windows we can't track (failsafe). Log once
+    // via the action so the decision log surfaces it.
+    if (window_ordinal >= MAX_WINDOWS_PER_ANIM_LATCH) {
+        d.action = ACTION_NO_KEY;  // sentinel — no latch available
+        return d;
+    }
+
+    // NaN/Inf hygiene. A bad DB row OR a garbage SEH read could feed us
+    // a non-finite float. Comparisons against NaN return false, which
+    // would cause the lead-time check (`d.lead_time_ms > cfg.audio_cue_lead_ms`)
+    // to falsely succeed and fire a cue at random. Reject the row.
+    if (!std::isfinite(in.anim_time_s) ||
+        !std::isfinite(window.open_s) ||
+        !std::isfinite(window.close_s)) {
+        d.action = ACTION_NO_KEY;
+        return d;
+    }
+
+    const uint32_t bit = 1u << window_ordinal;
+    const bool already_consumed = (st->consumed_windows & bit) != 0;
+
+    // Past window-close: no cue, regardless of latch or filter.
+    if (in.anim_time_s > window.close_s) {
+        d.action = ACTION_SUPPRESSED_POST_WINDOW;
+        return d;
+    }
+
+    if (already_consumed) {
+        d.action = ACTION_LATCHED;
+        return d;
+    }
+
+    // Target filter: if enabled and target unknown OR not us, suppress.
+    //
+    // TODO(phase 4.1 commit 5+): emit ACTION_LATE_TARGET_SWITCH when target
+    // crosses from not-us → us AFTER the lead threshold was crossed but
+    // BEFORE window_close. Requires tracking per-window "was suppressed
+    // last poll" bitmap. Not needed for first-commit smoke since
+    // target_filter_enabled defaults to false; add when the filter
+    // validation cycle starts.
+    if (cfg.target_filter_enabled) {
+        if (!in.target_known || !in.target_match) {
+            d.action = ACTION_SUPPRESSED_TARGET;
+            return d;
+        }
+    }
+
+    // Negative-lead handling: if lead is negative, the "should fire" time
+    // is window_open_s + (-lead_ms / 1000). If that exceeds window_close_s,
+    // the cue can never fire for this window. Plan §lead-time-math.
+    if (cfg.audio_cue_lead_ms < 0) {
+        float fire_time_s = window.open_s + (-cfg.audio_cue_lead_ms / 1000.0f);
+        if (fire_time_s > window.close_s) {
+            d.action = ACTION_SUPPRESSED_NEGATIVE_LEAD_EXCEEDS_WINDOW;
+            return d;
+        }
+        if (in.anim_time_s < fire_time_s) {
+            d.action = ACTION_BEFORE_LEAD;
+            return d;
+        }
+        // Past fire_time_s and not yet consumed: fire.
+        st->consumed_windows |= bit;
+        d.action = ACTION_FIRE;
+        return d;
+    }
+
+    // Lead >= 0 path. Fire when (window_open_s - anim_time_s)*1000 <= lead.
+    // For lead == 0, that's "anim_time has reached window_open". For
+    // lead > 0, that's "anim_time is within lead_ms of window_open".
+    if (d.lead_time_ms > cfg.audio_cue_lead_ms) {
+        d.action = ACTION_BEFORE_LEAD;
+        return d;
+    }
+
+    // Lead threshold crossed. Tag with LATE_INSIDE_WINDOW only when
+    // anim_time is STRICTLY past window_open — at-or-before window_open
+    // is a normal predictive fire. Equality counts as on-time (lead=0
+    // semantics: "fire AT the window-open frame").
+    if (in.anim_time_s > window.open_s) {
+        st->consumed_windows |= bit;
+        d.action = ACTION_LATE_INSIDE_WINDOW;
+        return d;
+    }
+
+    st->consumed_windows |= bit;
+    d.action = ACTION_FIRE;
+    return d;
+}
+
+// Public entry point: evaluate all windows for one boss this tick.
+// Writes decisions to the sink. Returns the number of decisions emitted.
+static int EvaluatePredictionTick(const BossTickInput& in,
+                                  const PredictionConfig& cfg,
+                                  int64_t now_ms_rel) {
+    // Resolve cid first (uses DB).
+    uint32_t resolved_cid = ResolveCidForLookup(in.raw_cid, in.anim_id);
+
+    // Get-or-create state.
+    auto& st = g_bossLatch[in.boss_handle];
+
+    // Update instance/latch state. Even when there's no DB row, we still
+    // tick the latch so the next tick's transitions are correct.
+    BumpInstanceSeqIfNeeded(&st, resolved_cid, in.anim_id, in.anim_time_s,
+                            now_ms_rel);
+
+    // No DB loaded → emit one "no_db" decision and bail.
+    if (!g_parryDbLoaded.load(std::memory_order_acquire)) {
+        PredictionDecision d;
+        d.ts_ms_rel             = now_ms_rel;
+        d.boss_handle           = in.boss_handle;
+        d.boss_chr_ins          = in.boss_chr_ins;
+        d.raw_cid               = in.raw_cid;
+        d.resolved_cid          = 0;
+        d.anim_id               = in.anim_id;
+        d.anim_time_s           = in.anim_time_s;
+        d.configured_lead_ms    = cfg.audio_cue_lead_ms;
+        d.target_filter_enabled = cfg.target_filter_enabled;
+        d.target_match          = in.target_match;
+        d.anim_instance_seq     = st.anim_instance_seq;
+        d.action                = ACTION_NO_DB;
+        WritePredictionDecision(d);
+        return 1;
+    }
+
+    // No row for (cid, anim) → emit one "no_key" decision and bail. This
+    // is the COMMON case for animations the DB doesn't cover (idle, walk,
+    // most non-attack anims). The decision log filter at write time
+    // can rate-limit these.
+    if (resolved_cid == 0) {
+        PredictionDecision d;
+        d.ts_ms_rel             = now_ms_rel;
+        d.boss_handle           = in.boss_handle;
+        d.boss_chr_ins          = in.boss_chr_ins;
+        d.raw_cid               = in.raw_cid;
+        d.resolved_cid          = 0;
+        d.anim_id               = in.anim_id;
+        d.anim_time_s           = in.anim_time_s;
+        d.configured_lead_ms    = cfg.audio_cue_lead_ms;
+        d.target_filter_enabled = cfg.target_filter_enabled;
+        d.target_match          = in.target_match;
+        d.anim_instance_seq     = st.anim_instance_seq;
+        d.action                = ACTION_NO_KEY;
+        WritePredictionDecision(d);
+        return 1;
+    }
+
+    const std::vector<ParryWindow>* wins =
+        LookupParryWindows(resolved_cid, in.anim_id);
+    if (!wins || wins->empty()) {
+        // Should never happen if resolved_cid != 0 (we just looked it up),
+        // but be defensive. Emit a no_key and bail.
+        PredictionDecision d;
+        d.ts_ms_rel             = now_ms_rel;
+        d.boss_handle           = in.boss_handle;
+        d.boss_chr_ins          = in.boss_chr_ins;
+        d.raw_cid               = in.raw_cid;
+        d.resolved_cid          = resolved_cid;
+        d.anim_id               = in.anim_id;
+        d.anim_time_s           = in.anim_time_s;
+        d.configured_lead_ms    = cfg.audio_cue_lead_ms;
+        d.target_filter_enabled = cfg.target_filter_enabled;
+        d.target_match          = in.target_match;
+        d.anim_instance_seq     = st.anim_instance_seq;
+        d.action                = ACTION_NO_KEY;
+        WritePredictionDecision(d);
+        return 1;
+    }
+
+    // Per-window evaluation.
+    int emitted = 0;
+    for (size_t i = 0; i < wins->size(); ++i) {
+        if (i >= MAX_WINDOWS_PER_ANIM_LATCH) {
+            // Overflow guard: log a single warning by emitting an action
+            // that the writer will surface, and stop.
+            PredictionDecision d;
+            d.ts_ms_rel             = now_ms_rel;
+            d.boss_handle           = in.boss_handle;
+            d.raw_cid               = in.raw_cid;
+            d.resolved_cid          = resolved_cid;
+            d.anim_id               = in.anim_id;
+            d.anim_time_s           = in.anim_time_s;
+            d.window_ordinal        = (uint16_t)i;
+            d.configured_lead_ms    = cfg.audio_cue_lead_ms;
+            d.target_filter_enabled = cfg.target_filter_enabled;
+            d.target_match          = in.target_match;
+            d.anim_instance_seq     = st.anim_instance_seq;
+            d.action                = ACTION_NO_KEY;
+            WritePredictionDecision(d);
+            emitted += 1;
+            break;
+        }
+        PredictionDecision d = EvaluatePredictionWindow(
+            &st, in, cfg, (*wins)[i], (uint16_t)i, now_ms_rel);
+        WritePredictionDecision(d);
+        emitted += 1;
+    }
+    return emitted;
+}
+
+// ===========================================================================
+// Decision-log JSONL writer
+// ===========================================================================
+//
+// One file per session: <log_dir>/<session_tag>.predictions.jsonl. Opened
+// by the worker after session paths are resolved (commit 4); writes are
+// append-buffered with fflush on a 1s cadence matching existing logs.
+//
+// Rate limiting: ACTION_NO_KEY and ACTION_BEFORE_LEAD are the high-volume
+// states (boss-not-doing-anything-interesting or pre-threshold). We
+// rate-limit those to one row per (boss, anim_id, action) per second so
+// the log stays usable. Interesting transitions (FIRE, SUPPRESSED_*,
+// LATCHED, NO_DB) are always emitted.
+
+static FILE* g_predictionLog = nullptr;
+static CRITICAL_SECTION g_predictionLogLock;
+static bool g_predictionLogReady = false;
+
+// Structured rate-limit key. XOR composition can collide unrelated tuples;
+// a struct + custom hash avoids it. PredictionAction is uint8_t so the
+// packed key fits in 96 bits — use a pair<uint64,uint64> for the map key
+// (boss_handle | anim_id+action) since std::unordered_map needs a hash.
+struct PredRateKey {
+    uint64_t boss_handle;
+    uint64_t anim_id_action;   // (anim_id << 8) | action
+    bool operator==(const PredRateKey& o) const {
+        return boss_handle == o.boss_handle && anim_id_action == o.anim_id_action;
+    }
+};
+struct PredRateKeyHash {
+    size_t operator()(const PredRateKey& k) const noexcept {
+        // splitmix64-flavored mix; cheap and collision-friendly.
+        uint64_t x = k.boss_handle * 0x9E3779B97F4A7C15ull;
+        x ^= k.anim_id_action + 0x94D049BB133111EBull + (x << 6) + (x >> 2);
+        return static_cast<size_t>(x);
+    }
+};
+
+// Last-emit timestamp for the rate-limiter. MUST be accessed only under
+// g_predictionLogLock (so multi-threaded callers in future commits don't
+// race the map). Today the engine is single-threaded so this is just
+// hygiene; commit 4 may add a flusher thread that doesn't write but
+// also doesn't need this map.
+static std::unordered_map<PredRateKey, int64_t, PredRateKeyHash> g_predictionLogRateMap;
+static constexpr int64_t PREDICTION_LOG_RATE_LIMIT_MS = 1000;
+
+static bool IsRateLimitedAction(PredictionAction a) {
+    return a == ACTION_NO_KEY || a == ACTION_BEFORE_LEAD;
+}
+
+// Must be called WITH g_predictionLogLock held.
+static bool PredictionLogShouldEmitLocked(const PredictionDecision& d) {
+    if (!IsRateLimitedAction(d.action)) return true;
+    PredRateKey k{
+        d.boss_handle,
+        (static_cast<uint64_t>(d.anim_id) << 8) | static_cast<uint64_t>(d.action),
+    };
+    auto it = g_predictionLogRateMap.find(k);
+    int64_t prev = (it == g_predictionLogRateMap.end())
+        ? d.ts_ms_rel - PREDICTION_LOG_RATE_LIMIT_MS - 1   // force emit
+        : it->second;
+    if ((d.ts_ms_rel - prev) < PREDICTION_LOG_RATE_LIMIT_MS) return false;
+    g_predictionLogRateMap[k] = d.ts_ms_rel;
+    return true;
+}
+
+// Sanitize a float for JSON output. printf "%f" emits "nan"/"inf"/"-inf"
+// which are NOT valid JSON tokens — they would crash the regression
+// harness. Convert any non-finite value to 0.0f so the line stays valid.
+// Callers that care about non-finiteness should already have rejected
+// the row to ACTION_NO_KEY; this is belt-and-suspenders for the NO_DB /
+// NO_KEY paths that bypass the per-window NaN check.
+static inline float SanitizeJsonFloat(float v) {
+    return std::isfinite(v) ? v : 0.0f;
+}
+
+// Write one decision as a JSON line. Thread-safe via the critical section.
+// No-op if the log isn't ready (commit-4 will wire init).
+static void WritePredictionDecision(const PredictionDecision& d) {
+    if (!g_predictionLogReady || !g_predictionLog) return;
+
+    // Build the line in a stack buffer. Max realistic size ~500 chars.
+    char buf[640];
+    int n = _snprintf_s(buf, sizeof(buf), _TRUNCATE,
+        "{\"ts_ms\":%lld,"
+        "\"boss_handle\":%llu,"
+        "\"boss_chr_ins\":\"0x%016llx\","
+        "\"raw_cid\":%u,"
+        "\"resolved_cid\":%u,"
+        "\"anim_id\":%u,"
+        "\"anim_time_s\":%.4f,"
+        "\"window_ord\":%u,"
+        "\"window_open_s\":%.4f,"
+        "\"window_close_s\":%.4f,"
+        "\"lead_ms\":%.2f,"
+        "\"cfg_lead_ms\":%d,"
+        "\"target_filter\":%s,"
+        "\"target_match\":%s,"
+        "\"inst_seq\":%llu,"
+        "\"action\":\"%s\"}\n",
+        (long long)d.ts_ms_rel,
+        (unsigned long long)d.boss_handle,
+        (unsigned long long)d.boss_chr_ins,
+        d.raw_cid,
+        d.resolved_cid,
+        d.anim_id,
+        SanitizeJsonFloat(d.anim_time_s),
+        (unsigned)d.window_ordinal,
+        SanitizeJsonFloat(d.window_open_s),
+        SanitizeJsonFloat(d.window_close_s),
+        SanitizeJsonFloat(d.lead_time_ms),
+        d.configured_lead_ms,
+        d.target_filter_enabled ? "true" : "false",
+        d.target_match ? "true" : "false",
+        (unsigned long long)d.anim_instance_seq,
+        PredictionActionName(d.action));
+    if (n <= 0) return;
+
+    // Both rate-limit check and fwrite happen under the lock. The lock
+    // is a process-local critical section so contention is bounded;
+    // single-threaded callers in v1 see ~0 overhead.
+    EnterCriticalSection(&g_predictionLogLock);
+    bool ok = PredictionLogShouldEmitLocked(d);
+    if (ok && g_predictionLog) {
+        fwrite(buf, 1, (size_t)n, g_predictionLog);
+    }
+    LeaveCriticalSection(&g_predictionLogLock);
+}
+
+// Open/close hooks called from worker init / shutdown (commit 4 wires).
+static bool PredictionLogOpen(const char* path) {
+    InitializeCriticalSection(&g_predictionLogLock);
+    if (fopen_s(&g_predictionLog, path, "w") != 0 || !g_predictionLog) {
+        BootLog("prediction_log_fail: cannot open %s (errno=%d)", path, errno);
+        DeleteCriticalSection(&g_predictionLogLock);
+        return false;
+    }
+    // Clear stale rate-limit state in case Open is called after a prior
+    // session (defensive — current architecture is one Open per process,
+    // but matches the parry-DB parse-into-locals hygiene).
+    g_predictionLogRateMap.clear();
+    g_predictionLogReady = true;
+    BootLog("prediction_log_ok: %s", path);
+    return true;
+}
+
+static void PredictionLogFlush() {
+    if (!g_predictionLogReady) return;
+    EnterCriticalSection(&g_predictionLogLock);
+    if (g_predictionLog) fflush(g_predictionLog);
+    LeaveCriticalSection(&g_predictionLogLock);
+}
+
+static void PredictionLogClose() {
+    if (!g_predictionLogReady) return;
+    EnterCriticalSection(&g_predictionLogLock);
+    if (g_predictionLog) {
+        fflush(g_predictionLog);
+        fclose(g_predictionLog);
+        g_predictionLog = nullptr;
+    }
+    g_predictionLogRateMap.clear();
+    LeaveCriticalSection(&g_predictionLogLock);
+    DeleteCriticalSection(&g_predictionLogLock);
+    g_predictionLogReady = false;
 }
 
 // ===========================================================================
