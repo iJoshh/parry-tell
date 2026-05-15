@@ -1,3 +1,74 @@
+## 2026-05-15 — Phase 4.0 Gate 0.B SOLVED: target-of-attention field at ai_struct +0xC988
+
+### Research
+
+- **Gate 0.B resolved.** Boss target-of-attention field confirmed at
+  `ChrIns +0x580 (AIBag*) → +0xC0 (AIStruct*) → +0xC988`.
+  Type is `FieldInsHandle` (u64), NOT a `ChrIns*` pointer. Sentinel is
+  `0xFFFFFFFFFFFFFFFF` (no current target). Validated on 5,521 real-boss
+  samples from v7.3 capture: 63.6% match against `player_handle` when boss
+  was targeting Josh, 3 distinct handle values matching exactly what was on
+  screen (player, jellyfish summon, sentinel), 9 clean transitions, zero
+  false positives. Aligns with TarnishedTool prior art: `+0xC480` =
+  TargetingSystem base, `+0xC988` = `+0x508` into that sub-struct,
+  plausibly `currentTarget`.
+
+### Added
+
+- `probe/probe.cpp` v7.0–v7.3 — four probe iterations this session:
+  - v7.0: added regions `ai_bag_head`, `ai_struct_head`, `module_bag_head`
+    on focused enemies; established 0% ChrIns* match across 5.27M slots,
+    confirming field is handle-shaped.
+  - v7.1: added player's own `FieldInsHandle` to sample header (reused
+    v6.2 reserved slot); wire-format backward-compatible with old captures
+    (`player_handle = 0` on parse).
+  - v7.2: added regions `ai_struct_mid` (+0x1000..+0x4000),
+    `action_req_head` (+0x000..+0x200), `player_chr_ins`
+    (+0x000..+0x800); threaded `player_chr_ins` through
+    `WriteTier3ForEnemy` / `WriteEnemyRecord` for sample-scoped region 15.
+  - v7.3: added regions `ai_struct_far`, `ai_struct_deep`, `ai_struct_tgt`
+    covering the +0x4000..+0xE000 gap (TarnishedTool TargetingSystem
+    range); re-enabled `REGION_MODULE_BAG_MEMBER` (module body capture);
+    fixed friendly-exclusion bug where `playerChrIns` was excluded from
+    `friendlyPCs[]` causing player to be selected as "nearest enemy" in
+    ~21% of samples.
+- `tools/probe_bin.py` — added region names for IDs 10–18; added
+  `player_handle` field to `Sample`; reads v7.1's previously-reserved
+  8-byte slot.
+- `tools/analyze_target_field.py` — NEW. Scans 8-byte aligned slots in
+  target regions for player `ChrIns*` OR player handle equality.
+  Coverage-weighted scoring. Skips player-as-focused samples.
+  Self-reference detection + penalty. Iteratively hardened through two
+  Codex adversarial critic passes (caught: nonexistent import, missing
+  offset normalization, broken `with_suffix` on version-numbered paths,
+  missing coverage gate, broken handle-shape predicate, missing handle
+  equality testing, missing self-ref classification).
+- `probe/releases/` — 4 new DLL archives:
+  `parry-tell-probe-v7.{0,1,2,3}-target-scan.dll` + tarballs.
+- `probe/releases/v7.3-target-field-report.md` — analyzer output pinning
+  the Gate 0.B discovery.
+
+### Fixed
+
+- Friendly-exclusion bug in qualification nearest-enemy selection:
+  `if (friendlyChr == playerChrIns) already = true` was excluding the
+  player from `friendlyPCs[]`, so the downstream exclusion check never
+  matched Josh. This caused the player to be selected as the "nearest
+  enemy" in ~21% of v7.2 samples, producing a false-positive
+  `action_req +0x08` candidate (the action's owner pointer, not a target
+  field). Fixed in v7.3; zero player-as-focused samples in the v7.3
+  capture.
+
+### Refuted (do not re-investigate)
+
+- `ChrIns +0x6A0` as enemy `targetHandle` (Erd-Tools-CPP layout claim).
+  Verified 100% zero on enemies in v7.2 region 0 data — the
+  +0x6A0..+0x6C0 range is player-specific lock-on storage.
+- `ChrIns*` pointer-equality as the target field shape. 0% across 5M+
+  u64 slots in v7.0 + v7.2 combined.
+- `ActionRequest +0x08` as target candidate. False positive from
+  friendly-exclusion bug + self-reference (owner pointer, not target).
+
 ## 2026-05-11 (evening, second session-close) — qualify_oracle end-to-end PASS; launch-monitor tooling; Bundle A plan decision
 
 ### Fixed

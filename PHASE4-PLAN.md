@@ -1073,3 +1073,61 @@ the MVP-audio-only fallback is explicitly accepted.
 - The target-field validation should be treated as adversarial. The dangerous
   false positive is a field that looks perfect in solo play because every
   plausible "target-ish" value is Josh.
+
+## Session Log
+
+### 2026-05-15 — Phase 4.0 Gate 0.B resolved (target field at ai_struct +0xC988)
+
+**Accomplishments**
+
+- Gate 0.B is DONE. Boss target-of-attention field locked at
+  `ChrIns +0x580 → +0xC0 → +0xC988` (FieldInsHandle / u64, sentinel
+  `0xFFFFFFFFFFFFFFFF`). Validated on 5,521 real-boss samples: 63.6%
+  player_handle match when boss was targeting Josh, 3 distinct handle
+  values matching on-screen state, 9 clean transitions, zero false
+  positives.
+- Four probe iterations shipped (v7.0 → v7.1 → v7.2 → v7.3). Each
+  iteration was preceded by a Codex deep-critic adversarial review that
+  caught real bugs and named specific offsets to scan, saving an estimated
+  2–3 probe roundtrips (~15–20 min each).
+- Friendly-exclusion bug found and fixed: player was being selected as
+  "nearest enemy" in ~21% of v7.2 samples due to `playerChrIns` being
+  excluded from `friendlyPCs[]`. Fix confirmed — zero player-as-focused
+  samples in v7.3 capture.
+- `tools/analyze_target_field.py` written from scratch and hardened
+  through two Codex critic passes. Coverage-weighted scoring,
+  self-reference penalty, handle-equality testing.
+- `tools/probe_bin.py` extended: region names 10–18, `player_handle`
+  field, backward-compatible v7.1 wire format.
+- 4 DLL archives committed to `probe/releases/`. v7.3 deployed to
+  `/mnt/station-mods/parry-tell-probe.dll` (md5 d9083a17).
+- Capture artifacts: `qualification-20260515-133028` (652 MB, 11,597
+  samples) is the definitive Gate 0.B capture. Report at
+  `probe/releases/v7.3-target-field-report.md`.
+
+**Refuted this session (do not re-investigate)**
+
+- `ChrIns +0x6A0` as enemy targetHandle — 100% zero on enemies; this
+  range is player-specific lock-on storage.
+- ChrIns* pointer-equality as target field shape — 0% across 5M+ slots.
+- `ActionRequest +0x08` as target candidate — false positive from
+  friendly-exclusion bug + self-reference (owner pointer).
+
+**Current state**
+
+- Phase 4.0 (Gate 0.B research): **DONE**. Offset locked.
+- Phase 4.1 (prediction thread + hash table init): **NEXT**.
+- Phase 4.2–4.5: as planned, no changes needed.
+- Probe on station is v7.3-target-scan instrumentation mode. Production
+  v0.1.0 probe will read `ai_struct +0xC988` directly; the v7.x research
+  regions will not ship.
+
+**Next steps**
+
+1. Phase 4.1 kickoff: Codex drafts prediction-thread architecture (worker
+   thread, hash table init, lead-time math, latch semantics); Claude
+   reviews + lands. Per PHASE4-PLAN.md locked design.
+2. Josh can stop the SSH service on station (`Stop-Service sshd` in admin
+   PowerShell) — not needed for VM-side coding.
+3. DLL on station will remain v7.3-target-scan until v0.1.0 production
+   probe is ready (Phase 4.1–4.4 complete).
