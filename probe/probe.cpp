@@ -72,7 +72,34 @@
 // Constants
 // ===========================================================================
 
-#define PROBE_VERSION_STR "v7.2-target-scan"
+#define PROBE_VERSION_STR "v7.3-target-scan"
+// v7.3-target-scan (Phase 4.0 Gate 0.B deep AI-struct scan, 2026-05-15):
+// After v7.2 found ZERO ChrIns* matches and ZERO meaningful FieldInsHandle
+// matches across 22 KB of boss territory, Codex's adversarial review
+// pointed at TarnishedTool prior art:
+//   - AiThink.TargetingSystem @0xC480 (target-related sub-struct)
+//   - AiThink.SpEffectObserveComp @0xDBF0 (linked-list, entries have Target @+0x18)
+//   - AiThink.AiAttackComp @0xDF10
+//   - ChrIns.targetHandle @+0x6A0 (Erd-Tools-CPP layout)
+// Of those: ChrIns+0x6A0/+0x6B0/+0x6B8/+0x6C0 verified offline against the
+// existing v7.2 region-0 (chr_ins_root) capture as 100% zero on enemies;
+// refuted (enemies don't have a target field in the player +0x6A0..+0x6C0
+// neighborhood — that range is player-specific lock-on storage).
+// v7.3 additions:
+//   REGION_AI_STRUCT_FAR  (16): ai_struct +0x4000..+0x8000 (16 KB)
+//   REGION_AI_STRUCT_DEEP (17): ai_struct +0x8000..+0xC000 (16 KB)
+//   REGION_AI_STRUCT_TGT  (18): ai_struct +0xC000..+0xE000 (8 KB)  — TargetingSystem + SpEffectObserveComp head
+//   REGION_MODULE_BAG_MEMBER (9, RE-ENABLED): bodies of every valid pointer
+//      in module_bag head [0..0x100]. v6.3 instrumentation; capped at 16
+//      modules × 512 B = 8 KB per focused enemy. The AI module pointer at
+//      module_bag +0x38 is the prime suspect.
+// Friendly-exclusion bug fix: qualification-nearest now refuses to pick the
+// local player's ChrIns as a focused enemy (was happening in 21% of v7.2
+// samples, polluting analysis).
+// Per-sample budget: existing focused-enemy ~32 KB + new ~48 KB = ~80 KB;
+// MAX_SAMPLE_BYTES=256 KB. Still comfortable. New regions ordered LAST in
+// WriteTier3ForEnemy so any per-sample overflow drops new data first.
+//
 // v7.2-target-scan (Phase 4.0 Gate 0.B expanded coverage, 2026-05-12):
 // Three new regions on focused enemies to widen the target-of-attention
 // search territory before another roundtrip:
@@ -202,6 +229,17 @@ static constexpr size_t REGION_CAP_MODULE_BAG_HEAD   = 0x100;   //  256 — firs
 static constexpr size_t REGION_CAP_AI_STRUCT_MID     = 0x3000;  // 12288 — ai_struct +0x1000..+0x4000 (mid-range)
 static constexpr size_t REGION_CAP_ACTION_REQ_HEAD   = 0x200;   //   512 — first 0x200 of ActionRequest module body
 static constexpr size_t REGION_CAP_PLAYER_CHR_INS    = 0x800;   //  2048 — player ChrIns first 0x800 (per-sample, ONCE per sample, not per enemy)
+// v7.3 target-of-attention research, AI-struct-deep + module-bag-bodies pass:
+// After v7.2's coverage gap analysis (and Codex adversarial review pointing at
+// TarnishedTool's named offsets in the AiThink struct), capture the unscanned
+// AI struct range +0x4000..+0xE000 in three chunks, with extra focus on the
+// known interesting territory near +0xC480 (TargetingSystem) and +0xDBF0
+// (SpEffectObserveComp). Also re-enable v6.3's MODULE_BAG_MEMBER scan to
+// inspect the BODIES of module-bag-resident modules (the AI module pointer
+// at module_bag +0x38 is the prime suspect).
+static constexpr size_t REGION_CAP_AI_STRUCT_FAR     = 0x4000;  // 16384 — ai_struct +0x4000..+0x8000
+static constexpr size_t REGION_CAP_AI_STRUCT_DEEP    = 0x4000;  // 16384 — ai_struct +0x8000..+0xC000
+static constexpr size_t REGION_CAP_AI_STRUCT_TGT     = 0x2000;  // 8192  — ai_struct +0xC000..+0xE000 (TargetingSystem @0xC480, SpEffectObserveComp @0xDBF0)
 
 // Region IDs (spec §Region-relative offsets rev3):
 enum RegionId : uint8_t {
@@ -225,6 +263,11 @@ enum RegionId : uint8_t {
     REGION_AI_STRUCT_MID         = 13,  // ai struct +0x1000..+0x4000 (12288 bytes)
     REGION_ACTION_REQ_HEAD       = 14,  // ActionRequest module +0x000..+0x200 (512 bytes)
     REGION_PLAYER_CHR_INS        = 15,  // player ChrIns +0x000..+0x800 (2048 bytes) — ONE per sample
+    // v7.3 target-of-attention deep AI-struct scan + module-bag-member-body re-enable:
+    REGION_AI_STRUCT_FAR         = 16,  // ai_struct +0x4000..+0x8000 (16384 bytes)
+    REGION_AI_STRUCT_DEEP        = 17,  // ai_struct +0x8000..+0xC000 (16384 bytes)
+    REGION_AI_STRUCT_TGT         = 18,  // ai_struct +0xC000..+0xE000 (8192 bytes) — TargetingSystem + SpEffectObserveComp
+    // (region 9 / REGION_MODULE_BAG_MEMBER is re-enabled; existing enum slot)
 };
 
 // Capture modes (spec §Modes):
@@ -1758,6 +1801,58 @@ static uint8_t WriteTier3ForEnemy(Writer& w,
                                   false, 0)) ++count;
             else return count;
         }
+        // v7.3: deep AI struct scan. Three regions cover the previously-
+        // unscanned gap between +0x4000 (where region 13 ai_struct_mid ends)
+        // and +0xE000 (where region 5 legacy tail begins). The +0xC000..0xE000
+        // region is the highest-value: TarnishedTool names TargetingSystem at
+        // +0xC480 and SpEffectObserveComp at +0xDBF0. Ordered LAST so any
+        // per-sample writer overflow drops new exploratory data first.
+        if (s.ai_struct) {
+            if (WriteRegionRecord(w, REGION_AI_STRUCT_FAR,
+                                  s.ai_struct, 16u,
+                                  0x4000, REGION_CAP_AI_STRUCT_FAR,
+                                  false, 0)) ++count;
+            else return count;
+            if (WriteRegionRecord(w, REGION_AI_STRUCT_DEEP,
+                                  s.ai_struct, 17u,
+                                  0x8000, REGION_CAP_AI_STRUCT_DEEP,
+                                  false, 0)) ++count;
+            else return count;
+            if (WriteRegionRecord(w, REGION_AI_STRUCT_TGT,
+                                  s.ai_struct, 18u,
+                                  0xC000, REGION_CAP_AI_STRUCT_TGT,
+                                  false, 0)) ++count;
+            else return count;
+        }
+        // v7.3: re-enable v6.3's REGION_MODULE_BAG_MEMBER. Scans the first
+        // MODULE_BAG_MEMBER_SCAN_BYTES of the module bag head at 8-byte stride
+        // for valid pointers, captures each module's body (up to 0x200 bytes
+        // each, MODULE_BAG_MEMBER_MAX modules total). The AI module at
+        // module_bag +0x38 is the prime suspect for the target field; this
+        // captures its body so the analyzer can inspect its contents.
+        if (s.module_bag) {
+            int memberN = 0;
+            for (int scan_off = 0;
+                 scan_off < MODULE_BAG_MEMBER_SCAN_BYTES &&
+                 memberN < MODULE_BAG_MEMBER_MAX;
+                 scan_off += 8)
+            {
+                uintptr_t mod_ptr = 0;
+                if (!SafeRead<uintptr_t>(s.module_bag + scan_off, &mod_ptr)) continue;
+                if ((mod_ptr & 0x7) != 0) continue;
+                if (!LooksLikeUserPtrFast(mod_ptr)) continue;
+                if (WriteRegionRecord(w, REGION_MODULE_BAG_MEMBER,
+                                      mod_ptr, 9u,
+                                      0, REGION_CAP_MODULE_BAG_MEMBER,
+                                      /*has_child_offset=*/true,
+                                      (uint16_t)scan_off)) {
+                    ++count;
+                    ++memberN;
+                } else {
+                    return count;  // writer full
+                }
+            }
+        }
     }
 
     return count;
@@ -2037,10 +2132,18 @@ static void SampleOnce(uint64_t tick, int64_t qpcStart) {
         uintptr_t friendlyChr = 0;
         if (!SafeRead<uintptr_t>(slotPtr, &friendlyChr)) continue;
         if (!LooksLikeUserPtrFast(friendlyChr)) continue;
-        // De-dup against the local player and other slots in our scan.
-        bool already = (friendlyChr == playerChrIns);
-        for (int j = 0; !already && j < friendlyCount; ++j) {
-            if (friendlyPCs[j] == friendlyChr) already = true;
+        // v7.3: de-dup against OTHER friendly slots we already collected,
+        // but DO include the local player. Previously this skipped the
+        // player ("already if matches playerChrIns"), which broke the
+        // downstream qualification-nearest exclusion check at line ~2313:
+        // the player wasn't in friendlyPCs[], so `chrIns == friendlyPCs[j]`
+        // never matched the player, and qualification-nearest picked Josh
+        // as the "nearest enemy" in 21% of v7.2 samples (player vs self
+        // has distance 0). Including the local player in friendlyPCs[]
+        // makes the existing exclusion check correctly skip Josh too.
+        bool already = false;
+        for (int j = 0; j < friendlyCount; ++j) {
+            if (friendlyPCs[j] == friendlyChr) { already = true; break; }
         }
         if (already) continue;
         friendlyPCs[friendlyCount++] = friendlyChr;

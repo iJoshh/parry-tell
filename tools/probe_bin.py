@@ -56,6 +56,11 @@ REGION_NAMES = {
     13: "ai_struct_mid",
     14: "action_req_head",
     15: "player_chr_ins",
+    # v7.3 target-of-attention deep AI struct scan:
+    16: "ai_struct_far",
+    17: "ai_struct_deep",
+    18: "ai_struct_tgt",
+    # (region 9 module_bag_member is re-enabled in v7.3; name already exists above)
 }
 
 CAPTURE_MODE_NAMES = {1: "smoke", 2: "qualification", 3: "discovery"}

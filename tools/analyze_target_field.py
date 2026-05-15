@@ -62,6 +62,11 @@ TARGET_REGION_IDS: set[int] = {
     # v7.2 expanded coverage:
     13,  # ai_struct_mid     -- +0x1000..+0x4000 (broader target hunting)
     14,  # action_req_head   -- ActionRequest module body
+    # v7.3 deep AI struct scan + module-bag-member-bodies:
+    9,   # module_bag_member -- body of every module in module_bag head (incl. AI module @+0x38)
+    16,  # ai_struct_far     -- +0x4000..+0x8000
+    17,  # ai_struct_deep    -- +0x8000..+0xC000
+    18,  # ai_struct_tgt     -- +0xC000..+0xE000 (TargetingSystem @0xC480, SpEffectObserveComp @0xDBF0)
     # NOTE: region 15 (player_chr_ins) is NOT scanned for target candidates
     # — it's the PLAYER's struct, not the boss's. We exclude it from the
     # boss target-of-attention scan so its contents don't pollute the
@@ -105,6 +110,11 @@ class SlotStats:
     samples_equals_player_ptr: int = 0
     samples_equals_player_handle: int = 0
     samples_equals_player_lock_handle: int = 0
+    # v7.3: track self-reference rate. A slot that always equals the
+    # focused enemy's own chr_ins is a "this is me" pointer (owner field
+    # in a module, parent backref, etc.) — useful diagnostic but not a
+    # target candidate. Surfaced so the report can disqualify them.
+    samples_equals_focused_chr_ins: int = 0
     distinct_values: set[int] = field(default_factory=set)
     transitions: int = 0
     last_value: Optional[int] = None
@@ -120,6 +130,7 @@ class SlotStats:
         player_chr_ins: int,
         player_handle: int,
         player_lock_handle: int,
+        focused_chr_ins: int,
     ) -> None:
         self.samples_observed += 1
         if value != 0:
@@ -134,6 +145,8 @@ class SlotStats:
         if player_lock_handle and player_lock_handle != HANDLE_SENTINEL \
                 and value == player_lock_handle:
             self.samples_equals_player_lock_handle += 1
+        if focused_chr_ins and value == focused_chr_ins:
+            self.samples_equals_focused_chr_ins += 1
         if len(self.distinct_values) < 64:
             self.distinct_values.add(value)
         if self.last_value is not None and value != self.last_value:
@@ -212,6 +225,7 @@ def scan_focused_enemy(
                 sample.player_chr_ins,
                 sample.player_handle,
                 sample.player_lock_on_target_handle,
+                enemy.chr_ins_abs,
             )
             observed += 1
         # u32 pass: 4-byte aligned slots within payload
@@ -239,6 +253,7 @@ def run_analysis(base_path: Path) -> dict:
 
     samples_total = 0
     focused_count = 0
+    skipped_player_as_enemy = 0
     has_v70_region_count = 0
     for sample in iter_samples(base_path):
         samples_total += 1
@@ -247,20 +262,27 @@ def run_analysis(base_path: Path) -> dict:
         for enemy in sample.enemies:
             if not enemy.is_focused:
                 continue
+            # v7.3: skip "player picked as focused enemy" samples — they
+            # pollute the ranking because the slot at (e.g.) action_req+0x08
+            # which holds the owner pointer will equal player_chr_ins when
+            # the focused entity IS the player. v7.3 probe fixes the root
+            # cause (player_chr_ins now in friendlyPCs[] for exclusion);
+            # this analyzer filter handles v7.2 and earlier captures too.
+            if enemy.chr_ins_abs == sample.player_chr_ins:
+                skipped_player_as_enemy += 1
+                continue
             focused_count += 1
             has_v70 = any(
                 r.region_id in (10, 11, 12) for r in enemy.regions
             )
             if has_v70:
                 has_v70_region_count += 1
-            # v7.2 region check: extra coverage regions present?
-            # (Not strictly needed for ranking logic, but useful in the
-            # report's diagnostic header.)
             scan_focused_enemy(enemy, sample, stats_u64, stats_u32)
 
     print(
         f"  total samples: {samples_total}, focused records: {focused_count} "
-        f"({has_v70_region_count} with v7.0 regions)",
+        f"({has_v70_region_count} with v7.0 regions, "
+        f"{skipped_player_as_enemy} skipped player-as-focused)",
         file=sys.stderr,
     )
     if has_v70_region_count == 0:
@@ -277,6 +299,7 @@ def run_analysis(base_path: Path) -> dict:
         "samples_total": samples_total,
         "focused_total": focused_count,
         "focused_with_v70_regions": has_v70_region_count,
+        "skipped_player_as_enemy": skipped_player_as_enemy,
         "stats_u64": stats_u64,
         "stats_u32": stats_u32,
     }
@@ -287,27 +310,28 @@ def score_u64(s: SlotStats, max_observed: int) -> float:
 
     Two equality signals: equals_player_ptr (target stores ChrIns*) and
     equals_player_handle (target stores FieldInsHandle). Either is a
-    positive answer; we take the MAX, scaled by coverage. The v7.0 capture
-    showed pointer-equality is 0% across all slots, so handle-equality is
-    the expected positive in v7.1+. Coverage-weighted: a slot observed once
-    that happens to equal the player must not outrank a slot observed
-    thousands of times with the same rate. Sub-minimum coverage returns 0.
+    positive answer; we take the MAX, scaled by coverage. The v7.0/v7.2
+    captures showed pointer-equality is 0% across all slots in real-boss
+    samples, so handle-equality is the expected positive in v7.1+.
+    v7.3 adds a self-reference penalty: a slot that mostly equals the
+    focused enemy's own chr_ins is an owner/parent backref, not a target.
     """
     if s.samples_observed < MIN_OBSERVATIONS_FOR_RANKING:
         return 0.0
     coverage = s.samples_observed / max(1, max_observed)
     # Equality signal: max of ptr-match-rate and handle-match-rate.
-    # Whichever shape the target field uses, the matching one is the
-    # positive signal. Multiplied by coverage so a single lucky match
-    # can't dominate.
     eq_rate = max(s.equals_player_ptr_rate, s.equals_player_handle_rate)
     base = eq_rate * 100.0 * coverage
     # Pointer-shape bonus: a slot that looks like a user-space pointer the
     # vast majority of the time is more interesting than one that is mostly
-    # zero/junk. (FieldInsHandle won't pass this filter — it doesn't live
-    # in user-space — but if the handle equality already fires, the base
-    # term will dominate regardless.)
+    # zero/junk.
     shape_bonus = s.plausible_ptr_rate * 5.0 * coverage
+    # v7.3 self-reference penalty: a slot that equals the focused enemy's
+    # own chr_ins is structurally an owner pointer (e.g., action_req+0x08
+    # caused our v7.2 false positive). Strongly disqualify.
+    self_ref_rate = (s.samples_equals_focused_chr_ins / s.samples_observed) \
+        if s.samples_observed else 0.0
+    self_ref_penalty = -50.0 * self_ref_rate * coverage
     # Variety bonus / penalty
     dv = len(s.distinct_values)
     if dv < 2:
@@ -316,7 +340,7 @@ def score_u64(s: SlotStats, max_observed: int) -> float:
         variety = -1.0  # too noisy: likely a counter
     else:
         variety = 1.0
-    return base + shape_bonus + variety
+    return base + shape_bonus + self_ref_penalty + variety
 
 
 def score_u32(s: SlotStats, max_observed: int) -> float:
@@ -369,6 +393,10 @@ def format_report(result: dict, top_n: int = 30) -> str:
     lines.append(
         f"- Focused records with v7.0 regions: "
         f"{result['focused_with_v70_regions']}"
+    )
+    lines.append(
+        f"- Player-as-focused-enemy samples SKIPPED (v7.2 friendly-exclusion "
+        f"bug): {result.get('skipped_player_as_enemy', 0)}"
     )
     lines.append("")
     lines.append("## Region map")
@@ -424,20 +452,24 @@ def format_report(result: dict, top_n: int = 30) -> str:
     )
     lines.append(
         "| Rank | Region | StructOff | Samples | =Ptr % | =Hdl % | "
-        "=LockHdl % | PtrLike % | Distinct | Trans | Score |"
+        "=LockHdl % | =Self % | PtrLike % | Distinct | Trans | Score |"
     )
-    lines.append("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for i, slot in enumerate(u64_ranked[:top_n], start=1):
         region_name = REGION_NAMES.get(
             slot.region_id, f"region_{slot.region_id}"
         )
         s = score_u64(slot, u64_max_obs)
+        self_ref_rate = (slot.samples_equals_focused_chr_ins
+                         / slot.samples_observed * 100.0) \
+            if slot.samples_observed else 0.0
         lines.append(
             f"| {i} | {region_name} | 0x{slot.struct_offset:04X} | "
             f"{slot.samples_observed} | "
             f"{slot.equals_player_ptr_rate * 100:.1f} | "
             f"{slot.equals_player_handle_rate * 100:.1f} | "
             f"{slot.equals_player_lock_handle_rate * 100:.1f} | "
+            f"{self_ref_rate:.1f} | "
             f"{slot.plausible_ptr_rate * 100:.1f} | "
             f"{len(slot.distinct_values)} | "
             f"{slot.transitions} | "
