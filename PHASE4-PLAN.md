@@ -1131,3 +1131,85 @@ the MVP-audio-only fallback is explicitly accepted.
    PowerShell) — not needed for VM-side coding.
 3. DLL on station will remain v7.3-target-scan until v0.1.0 production
    probe is ready (Phase 4.1–4.4 complete).
+
+### 2026-05-15 (evening) — Phase 4.2 first audible run achieved
+
+**Accomplishments**
+
+- Phase 4.2 base wiring shipped: PlaySoundW + embedded resource +
+  DllMain g_dllModule capture + InitAudioCue/FireAudioCue/ShutdownAudioCue
+  in audio.cpp/.h + `[audio]` INI section + winmm.lib linkage. Commit
+  `bd08154` plus `61f6981` (INI add + smoke lead bump).
+- v8.2.0 built and deployed (SHA `ec8baec0...`). Predictor fired 23 cue
+  decisions on cid 4311 over 105s of combat — proven via JSONL. Audio
+  not heard during the first run because (a) Josh's Windows master volume
+  was at 18% and (b) the sword-sample cue blended with the game's own
+  sword ambient.
+- Diagnostic-loud Pop Click (Pixabay/SoundReality CC0, +200% gain, 60ms)
+  generated and embedded as v8.2.1. SHA `71fb0f3b...`. First audible
+  run confirmed at 20:58 CDT.
+- INI tuned post-run: `audio_cue_lead_ms` 50 → 200 (50ms minus Windows
+  audio latency was perceived as too late to react), `target_filter_enabled`
+  false → true (eliminated 3 spurious cues from non-targeting cid 4070).
+  Third run: 4 fires, all target_match=True, lead times 178-199ms
+  vs 200ms target. Zero spurious cues.
+- Audio file work rolled back mid-session (Josh's call): ~32 minutes
+  of two-cue-mode design + sound-picking commits discarded. All 28
+  audio candidate files preserved in three independent backups.
+  Design captured in `TODO-PHASE-4.2-FOLLOWUPS.md`.
+
+**Documentation correction (binding)**
+
+- "Parry" in Elden Ring is bound to L2 (weapon art), not L1 (block).
+  Prior conversations said L1 — this was wrong. The 33-67ms parry
+  windows in the DB are L2-active-frames windows. All future Claude
+  sessions must use L2 terminology when discussing player response to
+  the cue. Recorded in `runs/v8.2.1-tuned-observations.md`.
+
+**Current state**
+
+- Phase 4.0 Gate 0.B: DONE (target field at ai_struct +0xC988)
+- Phase 4.1 predictor: DONE (predictor pipeline end-to-end proven)
+- Phase 4.2 audio cue: **FUNCTIONALLY COMPLETE** (audible + tuned)
+- Phase 4.3 INI surface: in progress (knobs added incrementally as
+  needed during Phase 4.2 tuning; formal completion pending review)
+- Phase 4.4 regression harness: NOT STARTED
+- Phase 4.5 release packaging: NOT STARTED
+
+**Next steps (priority order)**
+
+1. **Gather more parry-success data.** Josh fights different enemy
+   families with deliberate L2 (parry weapon art) attempts. Per-anim
+   record of "cue heard → staggered y/n" tells us whether 4003103 has
+   a real DB window or whether the DB might have false positives.
+2. **Investigate the anim 4003103 question.** Once Josh has more data,
+   determine which of three hypotheses applies (Josh-timing-off vs
+   variant-mismatch vs DB-false-positive). Variant mismatch would
+   require digging into the TAE-extraction tooling.
+3. **Two-cue mode** (`audio_cue_parry_now`) per
+   `TODO-PHASE-4.2-FOLLOWUPS.md`. Add a second fire at window_open to
+   pair with the existing predictive fire. Deferred mid-session;
+   ready for pickup whenever Josh wants it.
+4. **Phase 4.4 regression harness.** Once Phase 4.2 tuning settles,
+   build `tools/verify_predictions.py` to replay captured JSONL +
+   binary data and validate predictor decisions offline.
+
+**Open questions for Josh**
+
+- Continue using the Pop Click diagnostic WAV in production, or swap
+  to a quieter sound now that we've proven the pipeline works? The
+  diagnostic-loud version was for testing; the un-amplified
+  `popclick-pixabay-clean-60ms.wav` is preserved in the archive.
+- Does anim 4003103 actually have a parryable window in-game, or is
+  the DB row a false positive? Needs more L2 attempts to determine.
+- Is the 200ms lead final, or should it move further forward (300?
+  400?) once Josh has had more practice?
+
+**Tried and ruled out (this session)**
+
+- 200ms swordclash WAV as production cue: blended too well with sword
+  ambient, inaudible during combat. Archived for possible alternative
+  use. Decision: use a non-game-y synthetic click instead.
+- Single-knob `audio_cue_parry_now` two-cue mode: implementation
+  started, rolled back when scope grew larger than session window
+  allowed. Design preserved in TODO doc for next-session pickup.

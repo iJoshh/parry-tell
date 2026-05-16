@@ -1,3 +1,89 @@
+## 2026-05-15 (evening) — Phase 4.2 audio cue + first audible run
+
+### Added
+
+- `probe/audio.h` + `probe/audio.cpp` — AudioCue module surface
+  (`InitAudioCue` / `FireAudioCue` / `ShutdownAudioCue`). PlaySoundW
+  backend with `SND_MEMORY | SND_ASYNC | SND_NODEFAULT`. File-override
+  OR embedded resource loading. First-failure-disables-session safeguard.
+  Idempotent shutdown.
+- `probe/resource.h` + `probe/parry-tell-probe.rc` — Win32 resource glue
+  embedding the cue WAV as `IDR_AUDIO_CUE_WAV` (type `WAVE`).
+- `probe/assets/audio_cue.wav` — embedded cue WAV. Initial silent
+  placeholder; replaced 2026-05-15 21:01 with Pop Click diagnostic
+  (Pixabay SoundReality, CC0, +200% gain, 60ms, mono 44.1kHz 16-bit PCM).
+- `probe/assets/README.md` — WAV spec + replacement options.
+- New INI surface under `[audio]` section: `audio_cue_enabled`,
+  `audio_cue_wav_path`. The `audio_cue_lead_ms` knob from Phase 4.1
+  retained, now also accepted under `[audio]` (canonical) and
+  `[prediction]` (backward compat).
+- `runs/v8.2.1-tuned-observations.md` — analysis of the second tuned
+  smoke run, including the L1-vs-L2 terminology correction now binding
+  on all future sessions.
+- `TODO-PHASE-4.2-FOLLOWUPS.md` — work-in-progress design that was
+  rolled back mid-session: two-cue `audio_cue_parry_now` mode (fire
+  predictive cue THEN second "parry NOW" cue at window_open). Full
+  11-step implementation plan, SND_NOSTOP/clipping tradeoff analysis,
+  edge cases catalogued. Ready for future-session pickup.
+
+### Changed
+
+- `probe/probe.cpp` — Phase 4.2 wiring across multiple sites:
+  - `Config` struct: added `audio_cue_enabled` + `audio_cue_wav_path[MAX_PATH]`
+  - INI parser: handles `[audio]` section + parses both new keys in
+    `[prediction]` for backward compat
+  - `WritePredictionDecision` (line ~1610): added `FireAudioCue()` call
+    for ACTION_FIRE / ACTION_LATE_INSIDE_WINDOW / ACTION_LATE_TARGET_SWITCH
+    inside the rate-limit-gated section
+  - Worker init: `InitAudioCue(audio_cfg)` immediately after `LoadParryDb()`
+  - Worker shutdown: `ShutdownAudioCue()` on all 4 early-exit paths
+    (version, sig-scan, buffer-pool, hook-install) AND the normal exit
+  - `g_dllModule` HMODULE captured in DllMain `DLL_PROCESS_ATTACH` for
+    audio.cpp's `FindResourceW` call
+  - Linkage: `BootLog` + `LogF` converted from `static` to external so
+    audio.cpp can call them
+- `probe/probe.vcxproj`: added `winmm.lib` to AdditionalDependencies,
+  added `<ClCompile Include="audio.cpp" />`, `<ClInclude>` entries for
+  audio.h + resource.h, and new `<ResourceCompile>` ItemGroup for the .rc
+- `probe/v6/parry-tell-probe.ini.smoke`:
+  - Added `[audio]` section with `audio_cue_enabled = true` and empty
+    `audio_cue_wav_path`
+  - `audio_cue_lead_ms` raised from 50 to 200 after first-audible-run
+    feedback (50ms felt too late after ~25ms Windows audio latency)
+  - `target_filter_enabled` flipped from `false` to `true` after first
+    audible run produced 3 spurious cues from non-targeting enemy
+    (cid 4070); Phase 4.0 Gate 0.B field now in production use
+
+### Proven
+
+- **First audible run end-to-end.** v8.2.0 deployed at 20:41 CDT,
+  produced 23 fire decisions over 105s on cid 4311 — but inaudible
+  because of system master volume + ambient-blending sword sound choice.
+- **Second audible run with diagnostic-loud pop click.** v8.2.1 (Pop
+  Click WAV swap, no code change) deployed at 20:58. Josh confirmed
+  audible cue firing on combat parry windows.
+- **Third run with tuned INI** (lead=200, target_filter=on) at 21:13.
+  Result: 4 fires, all on cid 4311, all with target_match=True, lead
+  times 178-199ms (vs 200ms target — perfect calibration). Zero
+  spurious cues. Filter suppressed 2,822 non-targeted decisions.
+
+### Documentation correction (binding on all future sessions)
+
+- "Parry" in Elden Ring is bound to **L2 (weapon art)**, NOT L1 (block).
+  Prior Claude conversations consistently said "press L1 to the cue" —
+  this was wrong. L1 raises shield and mitigates damage; only L2 with
+  a parry-capable weapon art (Buckler Parry, Carian Retaliation, Storm
+  Wall, etc.) catches the attack and staggers. The 33-67ms windows in
+  the parry DB are L2-active-frames windows, not L1-block windows.
+  Carry-forward rule documented in `runs/v8.2.1-tuned-observations.md`.
+
+### Backups
+
+- `~/parry-tell-audio-archive/` (28 candidate WAV/MP3 files)
+- `/mnt/station-mods/parry-tell-audio-candidates/` (Windows-side mirror)
+- `/mnt/station-mods/parry-tell-probe.dll.v8.{0,1.2,1.3,2.0}-backup`
+  (DLL rollback chain)
+
 ## 2026-05-15 — Phase 4.0 Gate 0.B SOLVED: target-of-attention field at ai_struct +0xC988
 
 ### Research
