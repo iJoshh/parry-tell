@@ -49,7 +49,12 @@ prediction_poll_interval_ms = 4
 ; reaction window (~150-300ms is typical human reaction time).
 ; Tune up to 300/400 if the cue still feels late; down if it feels too
 ; premature for the boss's visual commit moment.
-audio_cue_lead_ms = 200
+;
+; 2026-05-15 evening: tuned 200 -> 150. Josh reported 200 felt early
+; relative to the boss's visual commit. At 150ms lead + ~25ms Windows
+; audio latency, perceived warning is ~125ms — still within typical
+; reaction window, more tightly coupled to the attack itself.
+audio_cue_lead_ms = 150
 
 ; Phase 4.0 Gate 0.B field validation paid off here. First audible run
 ; (2026-05-15) produced 3 spurious pops from cid 4070 (a roster enemy

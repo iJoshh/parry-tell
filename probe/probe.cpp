@@ -417,6 +417,58 @@ static std::atomic<int> g_adaptiveStep{0};
 // Session start (steady_clock ms; written by worker once before hook installs).
 static int64_t g_sessionStartMs = 0;
 
+// Phase 4.3 instrumentation: wall-clock ms (Unix epoch in local time) at
+// session start. Paired with g_sessionStartMs (steady_clock) to give the
+// JSONL its self-aligning wall-clock bridge. Written once by the worker
+// before PredictionLogOpen is called. Conversion:
+//   row_wall_clock_ms = g_sessionStartWallMs + ts_ms_rel
+// where ts_ms_rel is the existing per-row session-relative steady_clock
+// reading. Both anchors are captured in a single near-atomic window inside
+// CaptureSessionStartClocks() so drift between them is bounded by one
+// GetSystemTimeAsFileTime + chrono::steady_clock::now() call gap (~microseconds).
+static int64_t g_sessionStartWallMs = 0;
+
+// Capture the (wall_clock, steady_clock) pair atomically. Called once at
+// worker init; result lives in the two globals above. wall_clock is local
+// time (NOT UTC) milliseconds since Unix epoch, matching what GetLocalTime
+// produces for the session-tag filename and what humans/Whisper read on a
+// recording timeline. Computing locally-stamped epoch ms requires converting
+// FILETIME (UTC) to local via SystemTimeToTzSpecificLocalTime, then
+// back to FILETIME, then to int64 ms. This is fiddly but the value is what
+// downstream alignment actually needs.
+static void CaptureSessionStartClocks() {
+    // Steady clock first — this is the value JSONL ts_ms_rel deltas are against.
+    auto steady = std::chrono::steady_clock::now().time_since_epoch();
+    g_sessionStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(steady).count();
+
+    // Wall clock as local-time epoch ms. FILETIME is 100-ns intervals since
+    // 1601-01-01 UTC. Convert to ms-since-epoch (UTC), then add the local
+    // timezone offset so the value reads as local-time-as-epoch-ms (which
+    // is what filename timestamps and OBS recording filenames imply).
+    FILETIME ft_utc;
+    GetSystemTimeAsFileTime(&ft_utc);
+    ULARGE_INTEGER ull_utc;
+    ull_utc.LowPart = ft_utc.dwLowDateTime;
+    ull_utc.HighPart = ft_utc.dwHighDateTime;
+    // 116444736000000000 = ticks between 1601-01-01 and 1970-01-01 (UTC).
+    // 10000 = 100-ns intervals per millisecond.
+    int64_t utc_ms = (int64_t)((ull_utc.QuadPart - 116444736000000000ULL) / 10000ULL);
+
+    // Local-time-as-epoch-ms: add the local timezone bias. GetTimeZoneInformation
+    // returns Bias in MINUTES, where UTC = local + Bias (i.e., CDT has Bias=300).
+    // To get local-ms-as-epoch, we subtract Bias*60000 (NOT add).
+    TIME_ZONE_INFORMATION tzi;
+    DWORD tz_result = GetTimeZoneInformation(&tzi);
+    LONG totalBiasMin = tzi.Bias;
+    // DST adjustment: if the API says we're currently in daylight time, add
+    // DaylightBias (negative, typically -60 in CDT zones); standard adds StandardBias (usually 0).
+    if (tz_result == TIME_ZONE_ID_DAYLIGHT) totalBiasMin += tzi.DaylightBias;
+    else if (tz_result == TIME_ZONE_ID_STANDARD) totalBiasMin += tzi.StandardBias;
+    // tz_result == TIME_ZONE_ID_UNKNOWN: skip DST adjustment (Bias alone is best-effort).
+
+    g_sessionStartWallMs = utc_ms - ((int64_t)totalBiasMin * 60000LL);
+}
+
 // Producer-side emergency: free_pool < 4 for >= 200ms ⇒ drop broad sweep next sample.
 static std::atomic<bool> g_emergencyDropActive{false};
 static std::atomic<int64_t> g_lowFreePoolSinceMs{0};  // 0 = not in low state
@@ -1652,9 +1704,20 @@ static void WritePredictionDecision(const PredictionDecision& d) {
 
     if (log_open) {
         // JSONL path: format + rate-limit + write under the lock.
+        // Buffer sized for ~360-byte rows (was ~320 pre-Phase-4.3; new
+        // wall_clock_ms field adds ~24 bytes). 640 leaves plenty of slack
+        // for the worst-case anim_id (max 10 digits) and action_name
+        // (max 24 chars).
         char buf[640];
+        // wall_clock_ms = absolute wall-clock at which this prediction was
+        // emitted, computed as (session_start_wall + session_relative_ms).
+        // Aligns 1:1 to OBS recording wall-clock without any per-session
+        // anchor protocol — the bridge is captured at probe init.
+        const long long row_wall_clock_ms =
+            g_sessionStartWallMs + (long long)d.ts_ms_rel;
         int n = _snprintf_s(buf, sizeof(buf), _TRUNCATE,
             "{\"ts_ms\":%lld,"
+            "\"wall_clock_ms\":%lld,"
             "\"boss_handle\":%llu,"
             "\"boss_chr_ins\":\"0x%016llx\","
             "\"raw_cid\":%u,"
@@ -1671,6 +1734,7 @@ static void WritePredictionDecision(const PredictionDecision& d) {
             "\"inst_seq\":%llu,"
             "\"action\":\"%s\"}\n",
             (long long)d.ts_ms_rel,
+            row_wall_clock_ms,
             (unsigned long long)d.boss_handle,
             (unsigned long long)d.boss_chr_ins,
             d.raw_cid,
@@ -1722,6 +1786,38 @@ static bool PredictionLogOpen(const char* path) {
     // but matches the parry-DB parse-into-locals hygiene).
     g_predictionLogRateMap.clear();
     g_predictionLogReady = true;
+
+    // Phase 4.3 instrumentation: write a single session_open header line
+    // as the first row of the JSONL. Gives downstream analysis a
+    // self-aligning wall-clock + steady-clock + config snapshot without
+    // needing to cross-reference the .bin manifest or the filename.
+    // event="session_open" distinguishes this row from prediction events
+    // (which use the "action" field). Downstream readers should detect
+    // by either: presence of "event":"session_open", or absence of "anim_id".
+    char hdr[1024];
+    int hn = _snprintf_s(hdr, sizeof(hdr), _TRUNCATE,
+        "{\"event\":\"session_open\","
+        "\"schema_version\":1,"
+        "\"probe_version\":\"" PROBE_VERSION_STR "\","
+        "\"wall_clock_ms\":%lld,"
+        "\"session_start_ms\":%lld,"
+        "\"cfg_audio_cue_lead_ms\":%d,"
+        "\"cfg_target_filter_enabled\":%s,"
+        "\"cfg_audio_cue_enabled\":%s,"
+        "\"cfg_prediction_poll_interval_ms\":%d,"
+        "\"cfg_mode\":\"%s\"}\n",
+        (long long)g_sessionStartWallMs,
+        (long long)g_sessionStartMs,
+        g_cfg.audio_cue_lead_ms,
+        g_cfg.target_filter_enabled ? "true" : "false",
+        g_cfg.audio_cue_enabled ? "true" : "false",
+        g_cfg.prediction_poll_interval_ms,
+        g_cfg.session_name);
+    if (hn > 0) {
+        fwrite(hdr, 1, (size_t)hn, g_predictionLog);
+        fflush(g_predictionLog);
+    }
+
     BootLog("prediction_log_ok: %s", path);
     return true;
 }
@@ -5042,8 +5138,11 @@ static DWORD WINAPI WorkerMain(LPVOID) {
         return 0;
     }
 
-    auto sessionStart = std::chrono::steady_clock::now().time_since_epoch();
-    g_sessionStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(sessionStart).count();
+    // Phase 4.3: capture both steady_clock and wall_clock at session start
+    // in one near-atomic call. g_sessionStartMs and g_sessionStartWallMs
+    // are both populated; downstream JSONL writes use both for self-aligning
+    // wall-clock reconstruction (row_wall = session_start_wall + ts_ms_rel).
+    CaptureSessionStartClocks();
 
     // (d.1) Create shutdown event for waitable predictor sleep. Out of
     // DllMain so loader-lock-adjacent allocations stay in worker context.
