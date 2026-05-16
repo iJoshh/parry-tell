@@ -76,7 +76,7 @@
 // Constants
 // ===========================================================================
 
-#define PROBE_VERSION_STR "v7.3-target-scan"
+#define PROBE_VERSION_STR "v8.3.0-phase4.3-timing"
 // v7.3-target-scan (Phase 4.0 Gate 0.B deep AI-struct scan, 2026-05-15):
 // After v7.2 found ZERO ChrIns* matches and ZERO meaningful FieldInsHandle
 // matches across 22 KB of boss territory, Codex's adversarial review
@@ -417,56 +417,42 @@ static std::atomic<int> g_adaptiveStep{0};
 // Session start (steady_clock ms; written by worker once before hook installs).
 static int64_t g_sessionStartMs = 0;
 
-// Phase 4.3 instrumentation: wall-clock ms (Unix epoch in local time) at
-// session start. Paired with g_sessionStartMs (steady_clock) to give the
-// JSONL its self-aligning wall-clock bridge. Written once by the worker
-// before PredictionLogOpen is called. Conversion:
+// Phase 4.3 instrumentation: wall-clock ms (Unix epoch, UTC) at session start.
+// Paired with g_sessionStartMs (steady_clock) to give the JSONL its self-
+// aligning wall-clock bridge. Written once by the worker before
+// PredictionLogOpen is called. Conversion:
 //   row_wall_clock_ms = g_sessionStartWallMs + ts_ms_rel
-// where ts_ms_rel is the existing per-row session-relative steady_clock
-// reading. Both anchors are captured in a single near-atomic window inside
-// CaptureSessionStartClocks() so drift between them is bounded by one
-// GetSystemTimeAsFileTime + chrono::steady_clock::now() call gap (~microseconds).
+// where ts_ms_rel is the existing per-row session-relative steady_clock reading.
+//
+// UTC choice rationale (corrected from earlier draft that used local time):
+// Matroska/MKV creation_time is stored as UTC (ISO 8601 with Z suffix).
+// ffprobe returns it as UTC. Comparing local-time-ms against UTC-ms would
+// produce a 4-5 hour systematic shift in CDT/CST. UTC end-to-end avoids
+// that whole class of bug. Downstream Python tooling converts to local for
+// display; the JSONL stays UTC.
 static int64_t g_sessionStartWallMs = 0;
 
 // Capture the (wall_clock, steady_clock) pair atomically. Called once at
-// worker init; result lives in the two globals above. wall_clock is local
-// time (NOT UTC) milliseconds since Unix epoch, matching what GetLocalTime
-// produces for the session-tag filename and what humans/Whisper read on a
-// recording timeline. Computing locally-stamped epoch ms requires converting
-// FILETIME (UTC) to local via SystemTimeToTzSpecificLocalTime, then
-// back to FILETIME, then to int64 ms. This is fiddly but the value is what
-// downstream alignment actually needs.
+// worker init; result lives in the two globals above. wall_clock is UTC
+// milliseconds since Unix epoch — the canonical machine timestamp.
+// Conversion path: GetSystemTimeAsFileTime returns UTC FILETIME (100-ns
+// intervals since 1601-01-01 UTC); subtract the 1601→1970 offset and
+// divide by 10000 to get Unix-epoch ms.
 static void CaptureSessionStartClocks() {
     // Steady clock first — this is the value JSONL ts_ms_rel deltas are against.
     auto steady = std::chrono::steady_clock::now().time_since_epoch();
     g_sessionStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(steady).count();
 
-    // Wall clock as local-time epoch ms. FILETIME is 100-ns intervals since
-    // 1601-01-01 UTC. Convert to ms-since-epoch (UTC), then add the local
-    // timezone offset so the value reads as local-time-as-epoch-ms (which
-    // is what filename timestamps and OBS recording filenames imply).
+    // Wall clock as UTC epoch ms. FILETIME is 100-ns intervals since
+    // 1601-01-01 UTC. 116444736000000000 = ticks between 1601-01-01 and
+    // 1970-01-01. 10000 = 100-ns intervals per millisecond.
     FILETIME ft_utc;
     GetSystemTimeAsFileTime(&ft_utc);
     ULARGE_INTEGER ull_utc;
-    ull_utc.LowPart = ft_utc.dwLowDateTime;
+    ull_utc.LowPart  = ft_utc.dwLowDateTime;
     ull_utc.HighPart = ft_utc.dwHighDateTime;
-    // 116444736000000000 = ticks between 1601-01-01 and 1970-01-01 (UTC).
-    // 10000 = 100-ns intervals per millisecond.
-    int64_t utc_ms = (int64_t)((ull_utc.QuadPart - 116444736000000000ULL) / 10000ULL);
-
-    // Local-time-as-epoch-ms: add the local timezone bias. GetTimeZoneInformation
-    // returns Bias in MINUTES, where UTC = local + Bias (i.e., CDT has Bias=300).
-    // To get local-ms-as-epoch, we subtract Bias*60000 (NOT add).
-    TIME_ZONE_INFORMATION tzi;
-    DWORD tz_result = GetTimeZoneInformation(&tzi);
-    LONG totalBiasMin = tzi.Bias;
-    // DST adjustment: if the API says we're currently in daylight time, add
-    // DaylightBias (negative, typically -60 in CDT zones); standard adds StandardBias (usually 0).
-    if (tz_result == TIME_ZONE_ID_DAYLIGHT) totalBiasMin += tzi.DaylightBias;
-    else if (tz_result == TIME_ZONE_ID_STANDARD) totalBiasMin += tzi.StandardBias;
-    // tz_result == TIME_ZONE_ID_UNKNOWN: skip DST adjustment (Bias alone is best-effort).
-
-    g_sessionStartWallMs = utc_ms - ((int64_t)totalBiasMin * 60000LL);
+    g_sessionStartWallMs =
+        (int64_t)((ull_utc.QuadPart - 116444736000000000ULL) / 10000ULL);
 }
 
 // Producer-side emergency: free_pool < 4 for >= 200ms ⇒ drop broad sweep next sample.
@@ -1624,6 +1610,48 @@ static FILE* g_predictionLog = nullptr;
 static CRITICAL_SECTION g_predictionLogLock;
 static bool g_predictionLogReady = false;
 
+// Minimal JSON-string escaper for header fields that include user-controlled
+// data (most notably g_cfg.session_name read from the INI). Replaces
+// double-quote, backslash, and control characters with backslash escapes.
+// Non-ASCII bytes pass through as-is — the consumers are Python json.loads,
+// which accepts UTF-8 inside quoted strings without further encoding.
+//
+// outSize includes room for the terminating NUL. Truncation is silent but
+// always produces valid JSON (we never end mid-escape). Returns the number
+// of bytes written excluding NUL.
+static size_t JsonEscapeString(const char* in, char* out, size_t outSize) {
+    if (!out || outSize == 0) return 0;
+    size_t o = 0;
+    if (in == nullptr) { out[0] = 0; return 0; }
+    // Reserve 1 byte for the terminating NUL throughout.
+    for (size_t i = 0; in[i] != 0; ++i) {
+        unsigned char c = (unsigned char)in[i];
+        // Each escape consumes 2 bytes (\\x) or 6 (\\u00XX) plus NUL.
+        if (c == '"' || c == '\\') {
+            if (o + 2 + 1 > outSize) break;
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c == '\b') { if (o + 2 + 1 > outSize) break; out[o++] = '\\'; out[o++] = 'b'; }
+        else if (c == '\f') { if (o + 2 + 1 > outSize) break; out[o++] = '\\'; out[o++] = 'f'; }
+        else if (c == '\n') { if (o + 2 + 1 > outSize) break; out[o++] = '\\'; out[o++] = 'n'; }
+        else if (c == '\r') { if (o + 2 + 1 > outSize) break; out[o++] = '\\'; out[o++] = 'r'; }
+        else if (c == '\t') { if (o + 2 + 1 > outSize) break; out[o++] = '\\'; out[o++] = 't'; }
+        else if (c < 0x20) {
+            if (o + 6 + 1 > outSize) break;
+            // \u00XX form for other control characters.
+            static const char hex[] = "0123456789abcdef";
+            out[o++] = '\\'; out[o++] = 'u'; out[o++] = '0'; out[o++] = '0';
+            out[o++] = hex[(c >> 4) & 0xF];
+            out[o++] = hex[c & 0xF];
+        } else {
+            if (o + 1 + 1 > outSize) break;
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = 0;
+    return o;
+}
+
 // Structured rate-limit key. XOR composition can collide unrelated tuples;
 // a struct + custom hash avoids it. PredictionAction is uint8_t so the
 // packed key fits in 96 bits — use a pair<uint64,uint64> for the map key
@@ -1794,25 +1822,54 @@ static bool PredictionLogOpen(const char* path) {
     // event="session_open" distinguishes this row from prediction events
     // (which use the "action" field). Downstream readers should detect
     // by either: presence of "event":"session_open", or absence of "anim_id".
-    char hdr[1024];
+    //
+    // Escape session_name and probe_version through JsonEscapeString —
+    // session_name comes from the user's INI and probe_version is a macro
+    // that could change shape across builds, so both pass through escape
+    // to keep the header line guaranteed-valid JSON.
+    //
+    // Buffer sizing: session_name is char[128] in Config, so input is
+    // max 127 bytes + NUL. Worst-case JSON escaping (every byte -> \u00XX)
+    // is 6x, so the escape output buffer needs to be at least 6 * 127 + 1
+    // = 763 bytes. We allocate 800 for safety. probe_version is a
+    // compile-time string ~32 chars in current builds; 256 gives runway.
+    char session_name_esc[800];
+    char probe_version_esc[256];
+    JsonEscapeString(g_cfg.session_name, session_name_esc, sizeof(session_name_esc));
+    JsonEscapeString(PROBE_VERSION_STR,  probe_version_esc, sizeof(probe_version_esc));
+
+    // Map mode enum to its INI-string spelling for cfg_mode. Matches the
+    // tokens parsed by ParseMode at line ~664.
+    const char* mode_str =
+        (g_cfg.mode == MODE_SMOKE)         ? "smoke" :
+        (g_cfg.mode == MODE_QUALIFICATION) ? "qualification" :
+        (g_cfg.mode == MODE_DISCOVERY)     ? "discovery" :
+        "unknown";
+
+    // Header buffer: worst case is ~1.2 KB if session_name uses all 800
+    // escaped bytes. 2 KB gives slack.
+    char hdr[2048];
     int hn = _snprintf_s(hdr, sizeof(hdr), _TRUNCATE,
         "{\"event\":\"session_open\","
         "\"schema_version\":1,"
-        "\"probe_version\":\"" PROBE_VERSION_STR "\","
+        "\"probe_version\":\"%s\","
         "\"wall_clock_ms\":%lld,"
         "\"session_start_ms\":%lld,"
         "\"cfg_audio_cue_lead_ms\":%d,"
         "\"cfg_target_filter_enabled\":%s,"
         "\"cfg_audio_cue_enabled\":%s,"
         "\"cfg_prediction_poll_interval_ms\":%d,"
-        "\"cfg_mode\":\"%s\"}\n",
+        "\"cfg_mode\":\"%s\","
+        "\"cfg_session_name\":\"%s\"}\n",
+        probe_version_esc,
         (long long)g_sessionStartWallMs,
         (long long)g_sessionStartMs,
         g_cfg.audio_cue_lead_ms,
         g_cfg.target_filter_enabled ? "true" : "false",
         g_cfg.audio_cue_enabled ? "true" : "false",
         g_cfg.prediction_poll_interval_ms,
-        g_cfg.session_name);
+        mode_str,
+        session_name_esc);
     if (hn > 0) {
         fwrite(hdr, 1, (size_t)hn, g_predictionLog);
         fflush(g_predictionLog);

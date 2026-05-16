@@ -1,250 +1,127 @@
-# Phase 4.3 Data Gather Session — Plan (v2)
+# Phase 4.3 Data Gather Session — Plan (v4)
 
-**Status:** ready to execute
-**Created:** 2026-05-15 evening (post session-close)
-**Revised:** 2026-05-15 evening, post Codex review
-**Owner:** Josh runs the test session, Claude analyzes after
-**Prerequisite:** v8.2.1 DLL deployed, smoke INI tuned to `audio_cue_lead_ms=150`, `target_filter_enabled=true`
+**Status:** ready to execute (pending DLL deployment + smoke verification)
+**Created:** 2026-05-15 evening
+**Owner:** Josh runs the session, Claude analyzes after
+**Probe version required:** v8.3.0+ (Phase 4.3 instrumentation, built 2026-05-16
+00:10 CDT, SHA `6ee25016`). The probe now writes wall-clock metadata into the
+JSONL itself, eliminating the user-action anchor protocol that earlier drafts
+needed.
+
+---
+
+## What changed vs v1-v3
+
+Earlier drafts of this plan tried to align the JSONL predictor log to OBS
+video via a user-action anchor (spoken phrase + F11 keypress + audio-track
+keyclick detection). Codex and the deep critic blocked every draft because
+the anchor protocol was either error-prone (human speech-to-press lag),
+incompatible with the actual log schema (no `f11_armed` event in JSONL),
+or fragile (OBS file mtime gets clobbered on copy).
+
+The correct fix was upstream: the probe itself now writes a self-aligning
+wall-clock anchor into the JSONL. Specifically:
+
+- **First line of every `.predictions.jsonl`** is now a `session_open`
+  event row: `{"event":"session_open","schema_version":1,"probe_version":...,
+  "wall_clock_ms":<UTC epoch ms at session start>,"session_start_ms":<steady_clock>,
+  "cfg_audio_cue_lead_ms":...,...}`.
+- **Every prediction row** now has a `wall_clock_ms` field equal to
+  `(session_start_wall + ts_ms_rel)`. So each row knows its own wall-clock
+  time without any join.
+- **All wall_clock_ms values are UTC** — matches Matroska/MKV `creation_time`
+  which is also UTC, so the cross-reference math doesn't have timezone
+  bugs.
+
+Result: OBS recording wall-clock (UTC from MKV creation_time) → JSONL
+wall-clock (UTC) is a direct comparison. No anchor keypress, no verbal cue,
+no keyclick audio detection.
+
+This shrinks the plan from ~500 lines to ~150.
 
 ---
 
 ## Why we're doing this
 
-After session 2026-05-15 evening, two open questions need ground-truth evidence
-before we go further on filters or feature work:
+Two open questions need ground truth:
 
-1. **Coverage question:** Does the cue fire on enemies *other* than the cid 4311
-   field grunt we tested against? The 4 fires in run-3 were all the same cid.
-   If we run a broader engagement and only one cid ever produces cues, we have
-   a coverage gap — which is worse than over-firing because it's silent.
+1. **Coverage**: Does the cue fire on enemies *other* than cid 4311? Run 3 of
+   last session had 4 fires, all on cid 4311. Other enemies engaged silently.
+   Either Josh only swung at 4311, or other cids never enter the predictor's
+   firing path. The data alone can't tell us which.
 
-2. **Stagger-class question:** When the cue fires and Josh presses L2 within
-   the window, does the enemy actually stagger (riposte-ready) or just block
-   the damage? Three observed-but-not-classified failure modes:
-   - **A. Grab/throw cued anyway** — Josh L2s, gets grabbed, no parry possible.
-   - **B. Heavy attack cued, L2 catches damage but no stagger** — possible
-     hyperarmor or multi-parry-required boss.
-   - **C. Animation variant mismatch** — anim_id in DB but the actual variant
-     in-game doesn't honor the window (anim 4003103 mystery).
-
-Plain English: we need video of what's happening on screen, synced with the
-audio cue and the predictor's own log, so we can see exactly which attack
-fired which cue, and what happened next.
+2. **Stagger-class**: When the cue fires and Josh L2s in the window, does the
+   enemy stagger (riposte-ready) or just block? Three observed-but-unclassified
+   failure modes: grab/throw, heavy-attack-with-no-stagger, anim variant
+   mismatch.
 
 ---
 
-## Test target selection (do this BEFORE recording)
+## Pre-session task: target selection
 
-We are NOT going to "find any enemy and hope." We're picking targets from
-`data/parry_data.json` so we know in advance which moves SHOULD cue. This
-turns "missed cue" from a noisy null into a positive signal that the
-predictor failed to fire on a known-DB-covered animation.
+Run this BEFORE recording. We pick targets from the DB so we know in advance
+which moves should cue. "Missed cue" then becomes a positive signal that the
+predictor failed, not a "we don't know if we should have expected a cue."
 
-**Pre-session task (Claude runs this):**
+**Critical finding from DB audit (2026-05-16):** the cid 4311 we fired on
+successfully last session has **ZERO** entries in `parry_data.json`. The 4
+fires we observed must have come through some other code path
+(resolved_cid != raw_cid?) — this is itself a question this session needs
+to answer. Note the `resolved_cid` field on every fire row carefully.
+
+**Pre-session preflight gate (Claude runs, plan blocks if any cid is 0):**
 
 ```bash
 cd ~/claude/elden-ring && python3 -c "
-import json
+import json, sys
 with open('data/parry_data.json') as f: db = json.load(f)
-targets = ['c4310','c2130','c3010','c3660']  # initial pick: see notes below
-for cid in targets:
-    print(f'\\n=== {cid} ===')
+# Per-session candidate list — every cid here is a planned test target.
+# This list MUST be finalized + pre-verified before recording starts.
+candidates = {
+    'c4310': 'Crucible Knight (Stormhill / Limgrave Tunnels)',
+    'c2130': 'TBD humanoid (Claude maps in-game name pre-session)',
+    'c3010': 'TBD non-humanoid (Claude maps in-game name pre-session)',
+    # Test 4 boss cid MUST be added here BEFORE recording. Examples:
+    # 'c3700': 'Tree Sentinel',
+    # Margit's cid is TBD — verify via DB walk before assuming it's coverable.
+}
+fail = False
+for cid, name in candidates.items():
     anims = db['characters'].get(cid, {}).get('animations', {})
-    n = 0
-    for aid, a in anims.items():
-        pw = a.get('parry_windows', [])
-        if pw:
-            n += 1
-            if n <= 8:
-                for w in pw:
-                    print(f'  {aid}: parry {w[\"start_time\"]:.3f}-{w[\"end_time\"]:.3f}')
-    print(f'  total animations with parry windows: {n}')
+    n = sum(1 for a in anims.values() if a.get('parry_windows'))
+    status = 'OK' if n > 0 else 'BLOCK (no parry windows in DB)'
+    print(f'{cid} ({name}): {n} animations — {status}')
+    if n == 0: fail = True
+if fail:
+    print('\\n*** PREFLIGHT FAILED — fix candidate list before recording ***')
+    sys.exit(1)
+print('\\nAll candidates have DB coverage — preflight OK.')
 "
 ```
 
-**Pick rationale:**
+**If any cid in the list reports 0 windows, the session does NOT proceed
+until the candidate is swapped or the DB is rebuilt for that cid.**
 
-- **c4310 (49 windows)** — appears to be a Crucible Knight family variant.
-  Wiki-documented as parryable on sword attacks, NOT parryable on shield bash
-  / stomp / tail. Gives us mixed-move ground truth.
-- **c2130 (79 windows)** — a knight-class enemy (need to confirm; based on
-  numbering position it's likely a humanoid knight). Validates the read works
-  on a different humanoid skeleton variant.
-- **c3010 (63 windows)** — a beast/animal family enemy. Validates the read
-  works on a non-humanoid skeleton.
-- **c3660 (70 windows)** — picked for sample diversity.
+**Candidate pool (Claude maps cid → in-game enemy name pre-session):**
 
-**If Claude's pre-session research shows a target is unreachable in Josh's
-current save / Limgrave-range progression, swap it.** A Soldier of Godrick
-(`c2200` or similar — confirm pre-session) is the always-available fallback
-even if its window count is small.
+- `c4310` Crucible Knight — Stormhill / Limgrave Tunnels; well-documented
+  parry behavior (sword=parryable, shield-bash/tail/stomp=not). **45 anims
+  with parry windows in DB — VERIFIED.**
+- `c2130` (37 anims) — humanoid; Claude maps name before session.
+- `c3010` (28 anims) — non-humanoid skeleton variety; Claude maps name.
+- **Test 4 boss cid is TBD.** Claude proposes 1-2 options pre-session,
+  Josh confirms one is reachable in his save, then preflight gate verifies
+  it has DB coverage.
 
-**Hard rule:** every enemy fought in the session must be cross-referenced
-to a known cid in `parry_data.json` BEFORE recording. We log the (chr_name
-→ cid) mapping at the top of the session notes.
-
----
-
-## The signals we need to align
-
-There are FOUR independent timestreams. They all need a shared clock.
-
-| Stream | Source | Timestamp shape | Captured how |
-|---|---|---|---|
-| Video frame | OBS recording | Wall-clock + frame number | OBS scene |
-| Mod's predictions | `WritePredictionDecision` | `ts_ms` = session-relative milliseconds since DLL load | `predictions.jsonl` |
-| Mod's status events | `BootLog` / `LogF` | Wall-clock string per line | `parry-tell-probe.boot.log` |
-| Josh's verbal narration | Mic on a SEPARATE OBS audio track | Wall-clock in audio | OBS Mic track |
-
-**Key correction from v1 of this plan**: there is NO `f11_armed` event in
-JSONL. JSONL fields are: `ts_ms, boss_handle, boss_chr_ins, raw_cid,
-resolved_cid, anim_id, anim_time_s, window_ord, window_open_s,
-window_close_s, lead_ms, cfg_lead_ms, target_filter, target_match,
-inst_seq, action`. F11 events go to the boot log, which has wall-clock
-timestamps. So the anchor strategy uses the boot log, NOT JSONL.
-
-**Clock-alignment plan:**
-
-The mod's `ts_ms` is monotonic milliseconds since the DLL session started.
-The boot log timestamps lines as wall-clock. So:
-
-- Boot log has wall-clock for each major event (boot banner, F11 toggle).
-- JSONL has session-relative `ts_ms` for each prediction.
-- The boot log's `=== boot ===` banner line ties `ts_ms=0` to a wall-clock
-  moment.
-- OBS records its own wall-clock (system time) + frame number.
-
-We use the boot log as the bridge between JSONL session-time and OBS
-wall-clock. F11 keypresses ALSO appear in the boot log with wall-clock
-timestamps — those become our verification anchors.
-
-Result: we don't need an audio-keyclick anchor. The mod's own logs +
-OBS wall-clock are sufficient. Removing the keyclick dependency removes
-mechanical-keyboard-required assumption, removes mic-quality dependence,
-and removes one whole failure mode.
-
----
-
-## Procedure (what Josh does in-game)
-
-### Pre-session checklist (Claude does, before Josh starts)
-
-- [ ] Run the target-selection script above; confirm cid → name mapping
-- [ ] Verify station-mods has v8.2.1 DLL with audio_cue_lead_ms=150 INI
-- [ ] Clear stale `parry-tell-probe.csv` (per CLAUDE.md, OK to delete)
-- [ ] Note current line count of `parry-tell-probe.boot.log` — save as
-      `runs/session-<date>-bootlog-start-line.txt`
-- [ ] Note current line count of the `*.predictions.jsonl` file (which one
-      is configured) — save as `runs/session-<date>-jsonl-start-line.txt`
-- [ ] Confirm OBS Mic track is on a SEPARATE audio track from desktop audio
-      (OBS → Settings → Audio → Track 1 = desktop, Track 2 = mic, OR use
-      "Audio Output Capture" + "Audio Input Capture" separated)
-- [ ] **Clone Paramdex schema** (read-only research, no game-file extraction):
-      `git clone https://github.com/soulsmods/Paramdex.git /tmp/paramdex` —
-      read `/tmp/paramdex/ER/Defs/AtkParam.xml` myself to verify or refute
-      the Codex hyperarmor claim from earlier today.
-
-### Recording setup (Josh does)
-
-- [ ] OBS configured: 1080p60 capture of Elden Ring window. **Two audio
-      tracks**: mic on its own track, desktop audio on its own track. Saves
-      mixed output but keeps the source tracks separable (OBS Settings →
-      Advanced → File path: MKV recommended for multi-track; convertible to
-      MP4 after the fact). The reason: Whisper transcription of "L2 now" and
-      "stagger" gets badly confused when boss roars / sword clashes step on
-      Josh's voice on the same track.
-- [ ] System volume confirmed ≥ 50%
-- [ ] **One single recording for the whole session.** Don't split files —
-      fragments the alignment work.
-
-### In-game session
-
-**Step 0 — Session boot anchor (no F11 toggles in Step 0):**
-- [ ] Start OBS recording. Wait 5 seconds for it to stabilize.
-- [ ] Say aloud the wall-clock time you see on screen / phone:
-      "Recording start, fifteen forty-two on May fifteenth" (whatever it
-      actually is). Be clear and slow.
-- [ ] This is the human-readable wall-clock anchor. The actual cross-reference
-      anchor comes from the boot log's most recent boot banner line, which
-      has a precise timestamp — we use that, but the spoken time is a sanity
-      check.
-- [ ] **Do NOT press F11 here.** F11 is for combat captures (Step 2 only).
-
-**Step 1 — Solo grunt sample (default-target: a low-tier humanoid enemy with
-known DB coverage, e.g., Soldier of Godrick, confirmed in pre-session):**
-- [ ] Find the chosen enemy. Stand still and let them attack you.
-- [ ] Say aloud: **"Test 1, [enemy name], no F11."**
-- [ ] **Quota:** observe 6-10 swings minimum. Per-swing protocol:
-      1. Before swing: say nothing (they're idling).
-      2. As swing starts: say **"swing"** to mark the visual start.
-      3. If a cue fires: it fires; you don't need to call it (cue is on the
-         desktop audio track).
-      4. After swing resolves: say **"hit me"** (you took damage no L2) /
-         **"missed me"** (whiff) / **"L2 stagger"** (parry landed) /
-         **"L2 no stagger"** (caught damage no riposte) /
-         **"L2 too late"** / **"L2 too early"**.
-- [ ] Mix the L2 attempts: at least 3 swings let-them-hit-you (no L2) and at
-      least 3 swings with deliberate L2.
-- [ ] Say **"end test 1"** when done.
-
-**Step 2 — Medium enemy with deliberate F11 capture (Crucible Knight or
-chosen mid-tier from DB-confirmed list):**
-- [ ] Find the target.
-- [ ] Say aloud: **"Test 2, [enemy name]. F11 arming now."** Then press F11
-      ONCE to arm. The boot log will record "F11: armed" with a wall-clock
-      timestamp — that's our high-precision anchor for this segment.
-- [ ] Run a full engagement (~3-5 minutes). Per-swing protocol same as Step 1.
-- [ ] **Quota for this segment**: at least 15 swings observed. We need
-      multiple attempts per move type because some moves only appear every
-      30-60 seconds in the moveset rotation. If the enemy dies before quota
-      hit, run back to spawn and re-engage; the F11 stays armed.
-- [ ] If a cue fires on a non-sword move (shield bash, tail, stomp,
-      jumping attack, grab): say **"false positive [move name]"**.
-- [ ] If a sword swing (or any move you'd expect to be parryable per the
-      wiki) happens with NO cue: say **"missed cue, [move]"**.
-- [ ] When done: say **"end test 2, F11 disarming"** and press F11 ONCE to
-      disarm. Bin capture stops.
-
-**Step 3 — Beast/non-humanoid validation (c3010 family or equivalent
-non-humanoid from the DB):**
-- [ ] Find the target. Say **"Test 3, [enemy name], no F11."**
-- [ ] Quota: 6-10 swings, mixed L2 attempts.
-- [ ] Same per-swing callouts.
-- [ ] Say **"end test 3"** when done.
-
-**Step 4 — Boss attempt (your choice — Margit, Tree Sentinel, or whoever
-matches your save state):**
-- [ ] Travel to boss. Say **"Test 4, [boss name], F11 arming now"** and press
-      F11 ONCE.
-- [ ] Run the fight. **Quota: at least 25 swings observed across the fight.
-      If you die first, run back; if you kill before quota, that's fine and
-      we note it.**
-- [ ] Per-swing callouts same as Step 2.
-- [ ] When done (win or quit): say **"end test 4, F11 disarming"** and press
-      F11 ONCE.
-
-**Step 5 — Wrap:**
-- [ ] Return to Roundtable / Grace.
-- [ ] Say aloud: "Session end, [current wall-clock time]."
-- [ ] Stop OBS recording.
-- [ ] Save the recording to `/srv/shared/ER Mod/session-<date>.mkv` (or .mp4
-      after conversion).
-
-### How long is this session?
-
-Realistic estimate: **45-75 minutes of recording** for the four test steps.
-Set aside ~2 hours total including setup, travel between targets, and any
-re-engagement after dying. **You can split the session into "Tests 1-3"
-and "Test 4 (boss)" as two separate recordings if needed** — each recording
-must START with its own wall-clock anchor (Step 0 callout). Multiple
-recordings is fine; mid-recording stop-and-resume is NOT — that breaks the
-ts_ms timeline.
+Hard rule: **every enemy fought in the session must be in `parry_data.json`
+with a non-zero count of parry windows.** No "find a random mob and see what
+happens."
 
 ---
 
 ## Frozen settings for the session
 
-These do not change during the session. Lock them in BEFORE Step 0:
+Before recording, confirm:
 
 | Setting | Value | Lives at |
 |---|---|---|
@@ -252,217 +129,215 @@ These do not change during the session. Lock them in BEFORE Step 0:
 | `target_filter_enabled` | **true** | same |
 | `audio_cue_enabled` | **true** | same |
 | `prediction_decision_log_enabled` | **true** | same |
-| DLL version | **v8.2.1** | `/mnt/station-mods/parry-tell-probe.dll` |
-| Audio cue WAV | **diagnostic Pop Click** (embedded in DLL) | embedded |
+| DLL version | **v8.3.0** (Phase 4.3 instrumentation) | `/mnt/station-mods/parry-tell-probe.dll` |
 
-Document these in `runs/session-<date>-config.md` at session start.
-**Do NOT change settings mid-session.** If something feels off, stop the
-recording, log the change, start a new recording with new settings.
+Frozen for the whole session. If something feels off, stop the recording, log
+the change, start a NEW recording with new settings — never edit mid-session.
 
 ---
 
-## What Claude does after the session
+## Session procedure (Josh)
 
-### Step A — Pull captures
+### Recording setup
 
-- [ ] Read the OBS file from `/srv/shared/ER Mod/` — note duration via
-      `ffprobe`. Don't load whole file.
-- [ ] **SMB perf rule**: copy `predictions.jsonl` from
-      `/mnt/station-projects/elden-ring/logs/` (or wherever the smoke INI
-      pointed `log_dir`) to local `/tmp/` before any Python parsing.
-- [ ] Copy `parry-tell-probe.boot.log` (full file — it's small) and
-      `parry-tell-probe.csv` (if F11 captures landed any) to `/tmp/`.
-- [ ] Extract the two audio tracks separately:
-      `ffmpeg -i session.mkv -map 0:a:0 desktop.wav -map 0:a:1 mic.wav`
-- [ ] Slice JSONL and boot log to session-start line offsets recorded
-      pre-session.
+- [ ] OBS configured: 1080p60 game capture. **Two audio tracks** — mic on its
+      own track, desktop audio on its own track. (OBS Settings → Audio →
+      Mic on Track 2, Desktop on Track 1, OR use the Advanced Audio
+      Properties dialog to route them separately.) Output to MKV (multi-
+      track works cleanly in MKV; MP4 multi-track is fragile).
+- [ ] System volume confirmed ≥ 50%. The 18%-volume bug from last session.
+- [ ] **Note the OBS recording start time** — write down the system clock as
+      shown on Windows taskbar when you hit Record (or just trust OBS's own
+      filename timestamp; both are wall-clock and either works).
 
-### Step B — Build the alignment timeline
+### In-game session
 
-- [ ] **Anchor strategy (corrected):**
-      1. The boot log has wall-clock timestamps. Find the most recent
-         `=== boot ===` line after the session-start offset. Its
-         wall-clock time = `ts_ms=0` point.
-      2. JSONL events have `ts_ms` (session-relative). Add to the boot
-         wall-clock to get absolute wall-clock for each JSONL event.
-      3. OBS recording has wall-clock (file mtime = recording end; OBS
-         filename timestamp = recording start). Convert OBS frame → wall-
-         clock via the recording start.
-      4. Common clock = wall-clock. Tie everything to that.
-- [ ] **Verification anchors:** find F11 boot-log events. Each F11 press
-      has wall-clock. Cross-check: F11-press timestamp in boot log should
-      match within ±1 second to the spoken "F11 arming/disarming now"
-      moment in the mic track. If drift > 1s, flag clock skew.
-- [ ] Build a CSV: every cue fire event from JSONL (action contains "fire"),
-      with computed wall-clock + video offset, target cid, target_match,
-      anim_id, window timing.
-- [ ] Transcribe the mic track ONLY (clean audio, no game-noise overlap)
-      with Whisper. The two-track recording is the reason this works:
-      desktop audio with game sounds is on its own track, never mixed in.
+**Step 0 — Boot the game with the new DLL.**
+- Start Elden Ring. The mod loads automatically.
+- Confirm `parry-tell-probe.boot.log` shows the new probe version.
 
-### Step C — Cross-reference
+**Step 1 — Test segments (no F11 needed for any of these):**
 
-Produce `runs/session-<date>-alignment.md` with:
+Run each test segment as a separate, contiguous combat session. Between
+test segments, return to grace / rest at a site. Each test segment gets a
+SHORT verbal label spoken to the mic at its start so the post-session
+transcript can chapter the recording.
 
-1. **Coverage table:** For each distinct (cid, anim_id) Josh engaged, did
-   the predictor fire? Did it suppress (target_filter or other)? Did it
-   silently skip?
-2. **Stagger outcome table:** For each fire where Josh said "L2 stagger"
-   or "L2 no stagger", classify by move type (grab / heavy / light /
-   jumping / unknown).
-3. **False positive list:** Fires where Josh said "false positive [move]" —
-   what was the move, what anim_id did the predictor read, why did it
-   match.
-4. **Missed cue list:** Swings where Josh said "missed cue [move]" — was
-   the attack absent from `parry_data.json`? Did the predictor see the
-   anim_id but suppress? Did the read just fail (predictor saw nothing
-   for that ts range)?
-5. **Quota check:** Per-cid swing counts vs target. If quotas not met,
-   flag which outcomes are inconclusive and explicitly say so.
-
-### Step D — Decide next phase
-
-The four-outcome decision tree (next section) governs what we do next.
-
----
-
-## Pre-specified outcomes and follow-up procedure
-
-Reading the data should drop us into one of these branches. Each branch
-has a defined next step.
-
-**(1) Cue works broadly, over-firing dominated by grabs.**
-- Definition: Cues fire on multiple cids (≥3 distinct cids with fires).
-  False positives concentrated in moves Josh tagged as grabs.
-- Next: **Phase 4.3.2** — extend TAE parser to capture event type 304
-  (ThrowAttackBehavior). Add filter at `tools/build_parry_db.py` stage to
-  exclude windows on animations that contain ThrowAttackBehavior events.
-- Time: ~2-3 hour task.
-
-**(2) Cue works broadly, over-firing dominated by heavies/multi-parry.**
-- Definition: Cues fire on multiple cids. False positives are NOT grabs;
-  they're heavy attacks or "L2 caught damage but no stagger" on bosses
-  that wiki says require 2-3 parries.
-- Next: **Phase 4.3.3** — regulation.bin extraction + AtkParam join.
-  Sized as a full session.
-
-**(3) Cue only works on 1-2 cids, others silent.**
-- Definition: Despite Josh engaging multiple DB-covered cids, fires
-  concentrate on one or two with the rest receiving zero fires even when
-  they swung.
-- Next: **STOP filter work.** Coverage investigation becomes priority.
-  **Specific follow-up diagnostics:**
-  - Check JSONL `action` field on the silent cids — is the predictor
-    seeing them at all? (Should see ACTION_NO_KEY, ACTION_BEFORE_LEAD,
-    etc. even when no fire.)
-  - Check `anim_id` field — is it reading 0 (memory read fail) or a real
-    anim_id that's missing from the DB?
-  - Check `resolved_cid` vs `raw_cid` — is the resolver mapping silent
-    cids correctly?
-  - If anim_id reads as 0 on silent cids: read-side bug, return to Phase
-    4.0/4.1 territory.
-  - If anim_id reads correctly but doesn't match DB: DB coverage gap,
-    re-extract TAE for those specific cids.
-  - If anim_id matches DB but no fire: predictor logic bug.
-
-**(4) Cue fires on multiple cids but timing varies.**
-- Definition: Cue fires correctly on multiple cids but lead time feels
-  systematically off (early on some, late on others).
-- Next: **Phase 4.3.4** — per-cid-family lead-time calibration. Probably
-  build a small calibration tool to estimate optimal lead per cid from
-  the collected JSONL.
-
-**(5) Mixed results / quotas not met.**
-- Definition: data inconclusive across the decision tree.
-- Next: a second data-gather session focused on the specific cids/moves
-  that didn't get enough data.
-
----
-
-## Whisper transcription details (pre-empt the risk)
-
-Codex flagged Whisper risk in mixed-audio. The two-track separation
-removes the obvious failure mode (game audio bleed). But Whisper still
-has known weaknesses:
-
-- **Short utterances (1-2 words like "swing", "stagger") get dropped
-  or misrecognized.** Mitigation: Josh enunciates and adds a beat between
-  callouts. We'll find out post-session if this is a problem.
-- **Phrase consistency**: the cheat sheet (next section) keeps callout
-  phrases SHORT but unique so transcription accuracy stays high.
-- **Fallback if Whisper fails on the session**: I can transcribe by hand
-  from the mic.wav track. A 60-min session at 6-8 callouts per minute
-  is 360-480 callouts, each ~1-3 seconds. Manual transcription is ~2-3
-  hours. Acceptable backstop.
-
----
-
-## Verbal callout cheat sheet (Josh prints/reads this)
-
-**Minimum viable set — 6 callouts:**
+Verbal callout protocol — say the bare minimum, leave game audio loud.
 
 | Situation | Say this |
 |---|---|
 | Starting a test segment | "Test [N], [enemy name]" |
-| Each visible swing starts | "swing" |
-| You let it hit you (no L2) | "hit me" or "missed me" (whiff) |
-| You tried L2 and the enemy staggered | "L2 stagger" |
-| You tried L2 but caught damage no stagger | "L2 no stagger" |
+| You L2-parry and the enemy STAGGERS | "stagger" |
+| You L2 but the enemy keeps attacking (no stagger) | "no stagger" |
+| Cue fires on an obviously-unparryable move (grab/jump/etc) | "false positive" |
+| A clear swing happens with NO cue (you'd have expected one) | "missed cue" |
 | End of a test segment | "end test [N]" |
 
-**Optional but useful:**
+That's six phrases. Everything else can stay quiet — the JSONL captures
+the rest.
 
-| Cue fired on a non-parryable move | "false positive [move]" |
-| Visible parryable swing with no cue | "missed cue [move]" |
-| Arming F11 (only in Test 2 / Test 4) | "F11 arming now" / "F11 disarming" |
+**Test segments (all cids verified by preflight gate above):**
 
-That's it. 6 phrases minimum, 9 total. Forget a callout? Narrate it
-1-2 seconds late — Whisper alignment can handle a few-second slop on
-phrase timing.
+1. **Test 1: c2130 humanoid** (37 anims with parry windows; specific in-game
+   name confirmed pre-session). Quota: 8-12 swings observed, mixed L2 attempts.
+2. **Test 2: Crucible Knight** (c4310, 45 anims). High-value segment.
+   Crucible Knights have a varied moveset where wiki ground truth says some
+   moves are parryable (sword swings) and others aren't (shield bash, stomp,
+   tail). Quota: 15+ swings observed.
+3. **Test 3: c3010 non-humanoid** (28 anims; specific in-game name confirmed
+   pre-session). Validates predictor on non-humanoid skeleton. Quota: 8-12
+   swings.
+4. **Test 4: Boss** — cid pre-selected and verified non-zero before this
+   session. Quota: 25+ swings observed (run back if you die before quota; if
+   you win before quota, that's fine, we note it).
+
+**Step 2 — Wrap.** Return to grace. Stop OBS recording.
+
+**Save the MKV with a TIMESTAMP in the filename**, not just the date, to
+preserve OBS start wall-clock as a filename fallback (and to avoid clobbering
+if multiple sessions run on the same day):
+
+```
+/srv/shared/ER Mod/session-YYYYMMDD-HHMMSS.mkv
+```
+
+Where `YYYYMMDD-HHMMSS` matches the OBS recording start time. If OBS's
+default filename already has this format, just rename to add the `session-`
+prefix without dropping the timestamp.
+
+That's it. No F11. No anchor protocol. The JSONL self-documents.
 
 ---
 
-## Co-op safety / risk review
+## Post-session (Claude)
 
-Per CLAUDE.md, project rules:
+### Step A — Pull captures
 
-- Recording happens with the mod already loaded — no change to mod attach
-  surface, no new memory writes, no new code paths. **Co-op safety
-  unchanged.**
-- Paramdex clone is purely a GitHub schema download — does not extract
-  or modify game files. **Safe.**
-- F11 already in the mod; this session uses it as designed. **Safe.**
-- OBS is a standard recording tool with no game-process interaction
-  (game capture in OBS uses GPU-side hooks, no memory access to game
-  process). **Safe.**
+1. ffprobe the MKV at `/srv/shared/ER Mod/` to confirm duration + track
+   layout (verify there really are two audio tracks).
+2. Per SMB perf rule: copy the JSONL + log files for THIS session from
+   `/mnt/station-projects/elden-ring/logs/` to local `/tmp/` before any
+   Python parsing. The session tag is `smoke-<YYYYMMDD>-<HHMMSS>` (probe-side
+   naming pattern) — note this is DIFFERENT from the OBS recording filename
+   pattern `session-YYYYMMDD-HHMMSS.mkv`. Match the two only by the
+   `YYYYMMDD-HHMMSS` timestamp portion (probe and OBS both use local-time
+   timestamps for filenames, recorded within a few seconds of each other).
+   `ls -lt /mnt/station-projects/elden-ring/logs/ | head` to pick the most
+   recent set if the timestamps don't line up exactly.
+3. Extract the two audio tracks: `ffmpeg -i session.mkv -map 0:a:0 desktop.wav
+   -map 0:a:1 mic.wav` (verify track index assignment first via ffprobe).
+4. Transcribe `mic.wav` with Whisper. Game audio is on the other track so
+   transcription has clean voice input.
 
-No new co-op or anti-cheat surface area introduced.
+### Step B — Build the timeline
+
+All wall-clock values are UTC end-to-end. Display conversion to local time
+happens in the alignment markdown output, not in the math.
+
+1. **Read the session_open line** (first line of JSONL): extract `wall_clock_ms`
+   (UTC epoch ms) and `session_start_ms`. This is the JSONL's wall-clock anchor.
+2. **Read the OBS recording start wall-clock**: try in order:
+   a. `ffprobe -v error -show_entries format_tags=creation_time -of
+      default=nw=1:nk=1 session.mkv` — Matroska creation_time is UTC ISO 8601.
+      Parse with `datetime.fromisoformat(s.replace('Z','+00:00'))` and convert
+      to UTC epoch ms.
+   b. If `creation_time` is empty: parse the filename pattern
+      `session-YYYYMMDD-HHMMSS.mkv` — note this is LOCAL TIME from OBS, so
+      it needs to be converted to UTC via the system's timezone offset
+      (Chicago = -5h in CDT, -6h in CST).
+   c. If both fail: stop, log the failure, fix recording naming for next
+      session.
+3. **Every JSONL row already has `wall_clock_ms` in UTC**. To get its position
+   in the recording: `video_offset_seconds = (row_wall_clock_ms -
+   obs_start_wall_clock_ms_utc) / 1000`. Sanity check: this should fall
+   between 0 and the MKV duration; flag rows outside that range.
+4. **Verbal callouts from Whisper** come with their own offset within the mic
+   track, which IS the video timeline (extracted from the same MKV). No UTC
+   conversion needed for these — Whisper offsets are seconds-since-track-start,
+   which is seconds-since-recording-start.
+
+### Step C — Cross-reference
+
+Produce `runs/session-<date>-alignment.md`:
+
+1. **Coverage table**: For each cid Josh engaged, count fires + suppressions +
+   no-key actions. Build the matrix of "we expected fires here per DB" vs
+   "did we get fires."
+2. **Stagger outcome**: For each fire near a "stagger" or "no stagger" verbal
+   callout, classify the (cid, anim_id) → outcome.
+3. **False positives**: Fires near "false positive" callouts — what move was
+   it, anim_id, why did predictor match.
+4. **Missed cues**: "missed cue" callouts — was the anim in the DB? Did the
+   predictor see it at all (any action row in JSONL for that timeframe)?
+5. **Quota check**: Per-cid swing counts vs quota. Flag any segment as
+   inconclusive if quota not met.
+
+### Step D — Decide next phase
+
+Pre-specified branches (same as v3):
+
+**(1) Cue works broadly, over-firing dominated by grabs** → Phase 4.3.2:
+extend TAE parser to capture `ThrowAttackBehavior` event type 304, filter
+windows on grab animations.
+
+**(2) Cue works broadly, over-firing dominated by heavies/multi-parry** →
+Phase 4.3.3: regulation.bin extraction + AtkParam join. Full session of work.
+
+**(3) Cue fires on ≤2 distinct cids despite engaging more** → STOP filter
+work. Coverage diagnosis becomes priority. Specific diagnostics:
+- Check `action` field on silent cids — predictor seeing them at all?
+- Check `anim_id` — reading 0 (memory fail) or a real ID missing from DB?
+- Check `resolved_cid` vs `raw_cid` — resolver mapping silent cids correctly?
+
+**(4) Cue fires on multiple cids but timing varies** → Phase 4.3.4 per-cid
+lead calibration tool.
+
+**(5) Mixed / quotas not met** → second focused gather session.
+
+---
+
+## Co-op safety
+
+- Phase 4.3 changes added LOG output fields; no game-memory writes.
+- No new game-process interaction beyond what v8.2.1 already had.
+- Paramdex clone (not in this session, but if it comes up): pure GitHub
+  schema download, read-only research only.
+- OBS Game Capture mode does use process-attach hooks; if you want to be
+  maximally cautious, switch to Window Capture or Display Capture (slightly
+  worse image quality, no process interaction). Codex flagged this in v3
+  review. Up to Josh; co-op-safety baseline of the mod itself is unchanged.
 
 ---
 
 ## What this does NOT do
 
-- Does not extract regulation.bin. We use existing DB + new behavioral
-  ground truth to figure out where to invest extraction effort next.
-- Does not change predictor or audio code. Pure measurement session.
-- Does not commit to throw / hyperarmor / Paramdex paths yet.
+- Does not extract regulation.bin.
+- Does not change predictor or audio logic (Phase 4.3 changes are
+  observation-only).
+- Does not commit to any filter approach (throw / hyperarmor / Paramdex)
+  yet — those decisions fall out of the data.
 
 ---
 
 ## Open items not solved by this plan
 
-1. **F11 doesn't fire on `c0000` (player skeleton).** The DB has 4116
-   windows on c0000 but these are for the PLAYER side. Future work:
-   distinguish "this is a player anim, ignore" vs "this is a boss anim
-   I should cue on" — but this is not in scope for the session itself.
+1. **`c0000` (player skeleton) has 4116 parry windows** in the DB — those
+   are player-side events, the mod should ignore them. Verify post-session
+   that no `c0000` fires happened during play; if any did, that's a bug.
 
-2. **What if no Crucible Knight is reachable in Josh's save?** Pick
-   another DB-covered humanoid mid-tier (the pre-session script will
-   list options). Falling back to Soldier of Godrick only is acceptable
-   if necessary — we lose the "varied moveset" data point but keep
-   coverage data.
+2. **CRITICAL: cid 4311 (last session's test target) has zero parry windows
+   in `parry_data.json`.** Yet the predictor fired 4 times against cid 4311
+   in run 3. The probe must be matching on `resolved_cid` rather than
+   `raw_cid` for that case, and the resolved_cid is something else with DB
+   coverage. Use this session's data to confirm: check the `raw_cid` and
+   `resolved_cid` fields on every fire row, see whether resolved_cid points
+   to a cid that IS in the DB. This is a real architectural question, not
+   a session-procedure issue.
 
-3. **Audio cue fires from PlaySoundW on a Windows System sounds channel,
-   not in the game's audio session.** This means it WILL appear on OBS
-   desktop audio capture (good), but won't be in the game's own audio
-   mixer (irrelevant for this session).
+3. **Smoke verification of v8.3.0 DLL not yet done.** Before this session
+   counts as "real" data: load the new DLL, fire it once, eyeball the
+   `.predictions.jsonl` first line to confirm session_open lands correctly
+   and rows have `wall_clock_ms` populated. ~2 minute task; covered by the
+   "Smoke test locally" todo. Josh runs this manually next time he boots
+   ER with the new DLL deployed.
