@@ -40,6 +40,21 @@ verbose = true
 data_collection_mode = true
 prediction_enabled = true
 prediction_poll_interval_ms = 4
-audio_cue_lead_ms = 0
+
+; Phase 4.2 (v8.2.0): bumped from 0 to 50ms so the threshold is crossed
+; ~50ms BEFORE window_open. With 4ms polling, this gives the predictor
+; up to 12 poll cycles of margin, so decisions land as `fire` (not
+; `fire_late_inside_window`). Tune up if Josh hears audio late in-game,
+; down if the cue feels premature.
+audio_cue_lead_ms = 50
+
 target_filter_enabled = false
 prediction_decision_log_enabled = true
+
+[audio]
+; Phase 4.2 audio cue (v8.2.0+). Set audio_cue_enabled=false for silent
+; regression captures. Leave audio_cue_wav_path empty to use the embedded
+; placeholder WAV; set to an absolute Windows path for a custom tone
+; (e.g. C:\Projects\elden-ring\sounds\tick.wav).
+audio_cue_enabled = true
+audio_cue_wav_path =

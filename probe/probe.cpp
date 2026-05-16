@@ -685,13 +685,30 @@ static bool LoadConfig(const char* path, Config* cfg) {
             } else if (_stricmp(key, "audio_cue_lead_ms") == 0) {
                 cfg->audio_cue_lead_ms = atoi(val);
             } else if (_stricmp(key, "audio_cue_enabled") == 0) {
+                // Accepted under [prediction] for backward compat with
+                // pre-Phase-4.2 INIs; canonical home is [audio].
                 bool b; if (ParseBool(val, &b)) cfg->audio_cue_enabled = b;
             } else if (_stricmp(key, "audio_cue_wav_path") == 0) {
+                // Same backward-compat note as audio_cue_enabled.
                 strncpy_s(cfg->audio_cue_wav_path, MAX_PATH, val, _TRUNCATE);
             } else if (_stricmp(key, "target_filter_enabled") == 0) {
                 bool b; if (ParseBool(val, &b)) cfg->target_filter_enabled = b;
             } else if (_stricmp(key, "prediction_decision_log_enabled") == 0) {
                 bool b; if (ParseBool(val, &b)) cfg->prediction_decision_log_enabled = b;
+            }
+        } else if (_stricmp(section, "audio") == 0) {
+            // Phase 4.2 INI surface per PHASE4-PLAN.md §4.3. The three
+            // audio knobs share Config fields with their [prediction]
+            // siblings -- if both sections set the same key, last-write-wins
+            // by INI file order. Default is [audio] takes precedence
+            // because section ordering in shipped templates puts [audio]
+            // after [prediction]; this is not enforced in code.
+            if (_stricmp(key, "audio_cue_enabled") == 0) {
+                bool b; if (ParseBool(val, &b)) cfg->audio_cue_enabled = b;
+            } else if (_stricmp(key, "audio_cue_lead_ms") == 0) {
+                cfg->audio_cue_lead_ms = atoi(val);
+            } else if (_stricmp(key, "audio_cue_wav_path") == 0) {
+                strncpy_s(cfg->audio_cue_wav_path, MAX_PATH, val, _TRUNCATE);
             }
         }
         // Unknown section / key: ignored with no warning (spec: "Unknown keys
