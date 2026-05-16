@@ -41,14 +41,24 @@ data_collection_mode = true
 prediction_enabled = true
 prediction_poll_interval_ms = 4
 
-; Phase 4.2 (v8.2.0): bumped from 0 to 50ms so the threshold is crossed
-; ~50ms BEFORE window_open. With 4ms polling, this gives the predictor
-; up to 12 poll cycles of margin, so decisions land as `fire` (not
-; `fire_late_inside_window`). Tune up if Josh hears audio late in-game,
-; down if the cue feels premature.
-audio_cue_lead_ms = 50
+; Phase 4.2 (v8.2.1 first-audible tuning): bumped from 50 to 200ms after
+; first audible run on 2026-05-15. At 50ms lead + ~25ms Windows audio
+; latency, Josh perceived the cue as basically simultaneous with the
+; parry window — too late to react. 200ms gives ~175ms perceived warning
+; after audio latency, which lands in the "audible, recognize, press L1"
+; reaction window (~150-300ms is typical human reaction time).
+; Tune up to 300/400 if the cue still feels late; down if it feels too
+; premature for the boss's visual commit moment.
+audio_cue_lead_ms = 200
 
-target_filter_enabled = false
+; Phase 4.0 Gate 0.B field validation paid off here. First audible run
+; (2026-05-15) produced 3 spurious pops from cid 4070 (a roster enemy
+; outside aggro range) before any combat — all with target_match=False.
+; Flipping the filter on suppresses those without blocking any cue we
+; want. The +0xC988 target field was empirically validated on field
+; enemies in Phase 4.1.3, so this is safe to enable.
+target_filter_enabled = true
+
 prediction_decision_log_enabled = true
 
 [audio]
