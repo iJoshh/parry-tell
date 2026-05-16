@@ -48,17 +48,35 @@ Pick one, copy it to `probe/assets/audio_cue.wav`, rebuild the DLL.
 
 ## License compliance
 
-Both source sounds are CC-BY 4.0, which requires attribution. When we
-package v0.1.0 for release, add to CHANGELOG.md or a LICENSES.md:
+Both source sounds are CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/), which requires (a) credit,
+(b) a link to the license, and (c) indication of any modifications. When we
+package v0.1.0 for release, add a LICENSES.md or NOTICE file with the
+following block — adjust the entries to match whichever file is shipped
+as `audio_cue.wav`:
 
 ```
-Audio cue derived from:
-- "SwordClash01" by 32cheeseman32 (freesound.org/s/180820), CC-BY 4.0
-- "UI Button Click" by el_boss (freesound.org/s/677861), CC-BY 4.0
+parry-tell-probe audio cue
+==========================
+Derived from third-party Creative Commons-licensed audio.
+
+"SwordClash01" by 32cheeseman32 (https://freesound.org/s/180820/),
+  licensed under CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/).
+  Modifications: trimmed to <duration> ms, applied 5 ms fade-in /
+  15 ms fade-out, converted to mono 44.1 kHz 16-bit PCM WAV.
+
+"UI Button Click" by el_boss (https://freesound.org/s/677861/),
+  licensed under CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/).
+  Modifications: trimmed to 60 ms, applied 5 ms fade-out, converted
+  to mono 44.1 kHz 16-bit PCM WAV.
 ```
 
-Trim + format-conversion does NOT change license obligations — derivative
-works retain CC-BY-4.0 status. Attribution in release notes is sufficient.
+Trim + format-conversion does NOT change license status — derivative works
+retain CC BY 4.0. Only the SHIPPED `audio_cue.wav` needs attribution; the
+unused candidates in this directory don't need to be listed in the release
+NOTICE because they aren't distributed in the DLL.
 
 ## Re-trim recipe
 
@@ -80,5 +98,6 @@ Copies live at `/mnt/station-mods/parry-tell-audio-candidates/` so you can
 double-click to play from the Windows side. After picking one:
 
 ```bash
-cp probe/assets/candidates/<chosen>.wav probe/assets/audio_cue.wav
+# Substitute the actual filename you chose:
+cp probe/assets/candidates/swordclash-80ms-faded.wav probe/assets/audio_cue.wav
 ```
