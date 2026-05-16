@@ -1,0 +1,9 @@
+// parry-tell-probe.rc -- resource script for Phase 4.2 audio cue.
+//
+// Embeds the default audio cue WAV directly into the DLL so the mod ships
+// as a single artifact. Josh can override at runtime via the INI key
+// audio_cue_wav_path (handled in audio.cpp).
+
+#include "resource.h"
+
+IDR_AUDIO_CUE_WAV  WAVE  "assets/audio_cue.wav"

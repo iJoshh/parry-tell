@@ -70,6 +70,7 @@
 #include <cmath>
 
 #include "MinHook.h"
+#include "audio.h"
 
 // ===========================================================================
 // Constants
@@ -487,7 +488,8 @@ static void BootLogOpen() {
     }
 }
 
-static void BootLog(const char* fmt, ...) {
+// Phase 4.2: linkage is external (no `static`) so audio.cpp can call it.
+void BootLog(const char* fmt, ...) {
     if (!g_bootLogReady.load()) return;
     char buf[1024];
     va_list ap; va_start(ap, fmt);
@@ -553,6 +555,8 @@ struct Config {
     bool prediction_enabled                = true;
     int  prediction_poll_interval_ms       = 4;
     int  audio_cue_lead_ms                 = 0;
+    bool audio_cue_enabled                 = true;  // Phase 4.2 master switch
+    char audio_cue_wav_path[MAX_PATH]      = {0};   // Phase 4.2 override; empty = embedded resource
     bool target_filter_enabled             = false;
     bool prediction_decision_log_enabled   = true;
 
@@ -680,6 +684,10 @@ static bool LoadConfig(const char* path, Config* cfg) {
                 cfg->prediction_poll_interval_ms = atoi(val);
             } else if (_stricmp(key, "audio_cue_lead_ms") == 0) {
                 cfg->audio_cue_lead_ms = atoi(val);
+            } else if (_stricmp(key, "audio_cue_enabled") == 0) {
+                bool b; if (ParseBool(val, &b)) cfg->audio_cue_enabled = b;
+            } else if (_stricmp(key, "audio_cue_wav_path") == 0) {
+                strncpy_s(cfg->audio_cue_wav_path, MAX_PATH, val, _TRUNCATE);
             } else if (_stricmp(key, "target_filter_enabled") == 0) {
                 bool b; if (ParseBool(val, &b)) cfg->target_filter_enabled = b;
             } else if (_stricmp(key, "prediction_decision_log_enabled") == 0) {
@@ -1605,57 +1613,83 @@ static inline float SanitizeJsonFloat(float v) {
     return std::isfinite(v) ? v : 0.0f;
 }
 
-// Write one decision as a JSON line. Thread-safe via the critical section.
-// No-op if the log isn't ready (commit-4 will wire init).
+// Sink for every prediction decision. Two effects per call:
+//   1. (optional) Append JSONL row to the decision log if the log is open.
+//   2. Fire the Phase 4.2 audio cue if the action is a FIRE-class verb.
+//
+// Dedupe story: FIRE-class actions (ACTION_FIRE, ACTION_LATE_INSIDE_WINDOW,
+// ACTION_LATE_TARGET_SWITCH) are emitted exactly once per window thanks
+// to the per-window latch in EvaluatePredictionWindow (st->consumed_windows
+// |= bit before returning a FIRE). The JSONL rate-limiter targets the
+// NOISY actions (ACTION_NO_KEY, ACTION_BEFORE_LEAD) which would otherwise
+// emit ~250 rows/sec while a boss idles -- see IsRateLimitedAction. So
+// FIRE actions bypass the rate-limit entirely and just inherit the
+// upstream latch.
+//
+// Phase 4.2 fix: do NOT early-return when JSONL is disabled. Audio is the
+// product; JSONL is debug. The upstream latch is the audio dedupe. If
+// JSONL is disabled, the g_predictionLogLock critical section is
+// uninitialized, so we MUST skip the EnterCriticalSection path.
 static void WritePredictionDecision(const PredictionDecision& d) {
-    if (!g_predictionLogReady || !g_predictionLog) return;
+    const bool log_open = g_predictionLogReady && g_predictionLog;
 
-    // Build the line in a stack buffer. Max realistic size ~500 chars.
-    char buf[640];
-    int n = _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-        "{\"ts_ms\":%lld,"
-        "\"boss_handle\":%llu,"
-        "\"boss_chr_ins\":\"0x%016llx\","
-        "\"raw_cid\":%u,"
-        "\"resolved_cid\":%u,"
-        "\"anim_id\":%u,"
-        "\"anim_time_s\":%.4f,"
-        "\"window_ord\":%u,"
-        "\"window_open_s\":%.4f,"
-        "\"window_close_s\":%.4f,"
-        "\"lead_ms\":%.2f,"
-        "\"cfg_lead_ms\":%d,"
-        "\"target_filter\":%s,"
-        "\"target_match\":%s,"
-        "\"inst_seq\":%llu,"
-        "\"action\":\"%s\"}\n",
-        (long long)d.ts_ms_rel,
-        (unsigned long long)d.boss_handle,
-        (unsigned long long)d.boss_chr_ins,
-        d.raw_cid,
-        d.resolved_cid,
-        d.anim_id,
-        SanitizeJsonFloat(d.anim_time_s),
-        (unsigned)d.window_ordinal,
-        SanitizeJsonFloat(d.window_open_s),
-        SanitizeJsonFloat(d.window_close_s),
-        SanitizeJsonFloat(d.lead_time_ms),
-        d.configured_lead_ms,
-        d.target_filter_enabled ? "true" : "false",
-        d.target_match ? "true" : "false",
-        (unsigned long long)d.anim_instance_seq,
-        PredictionActionName(d.action));
-    if (n <= 0) return;
+    if (log_open) {
+        // JSONL path: format + rate-limit + write under the lock.
+        char buf[640];
+        int n = _snprintf_s(buf, sizeof(buf), _TRUNCATE,
+            "{\"ts_ms\":%lld,"
+            "\"boss_handle\":%llu,"
+            "\"boss_chr_ins\":\"0x%016llx\","
+            "\"raw_cid\":%u,"
+            "\"resolved_cid\":%u,"
+            "\"anim_id\":%u,"
+            "\"anim_time_s\":%.4f,"
+            "\"window_ord\":%u,"
+            "\"window_open_s\":%.4f,"
+            "\"window_close_s\":%.4f,"
+            "\"lead_ms\":%.2f,"
+            "\"cfg_lead_ms\":%d,"
+            "\"target_filter\":%s,"
+            "\"target_match\":%s,"
+            "\"inst_seq\":%llu,"
+            "\"action\":\"%s\"}\n",
+            (long long)d.ts_ms_rel,
+            (unsigned long long)d.boss_handle,
+            (unsigned long long)d.boss_chr_ins,
+            d.raw_cid,
+            d.resolved_cid,
+            d.anim_id,
+            SanitizeJsonFloat(d.anim_time_s),
+            (unsigned)d.window_ordinal,
+            SanitizeJsonFloat(d.window_open_s),
+            SanitizeJsonFloat(d.window_close_s),
+            SanitizeJsonFloat(d.lead_time_ms),
+            d.configured_lead_ms,
+            d.target_filter_enabled ? "true" : "false",
+            d.target_match ? "true" : "false",
+            (unsigned long long)d.anim_instance_seq,
+            PredictionActionName(d.action));
 
-    // Both rate-limit check and fwrite happen under the lock. The lock
-    // is a process-local critical section so contention is bounded;
-    // single-threaded callers in v1 see ~0 overhead.
-    EnterCriticalSection(&g_predictionLogLock);
-    bool ok = PredictionLogShouldEmitLocked(d);
-    if (ok && g_predictionLog) {
-        fwrite(buf, 1, (size_t)n, g_predictionLog);
+        if (n > 0) {
+            EnterCriticalSection(&g_predictionLogLock);
+            if (PredictionLogShouldEmitLocked(d) && g_predictionLog) {
+                fwrite(buf, 1, (size_t)n, g_predictionLog);
+            }
+            LeaveCriticalSection(&g_predictionLogLock);
+        }
     }
-    LeaveCriticalSection(&g_predictionLogLock);
+
+    // Phase 4.2: fire the audio cue. Independent of JSONL state -- audio
+    // is the product. The upstream per-window latch in
+    // EvaluatePredictionWindow guarantees this code sees at most one
+    // FIRE-class action per (boss, window) pair, so no further dedupe
+    // is needed here. FireAudioCue is a cheap no-op if audio is
+    // disabled by INI or init failed.
+    if (d.action == ACTION_FIRE ||
+        d.action == ACTION_LATE_INSIDE_WINDOW ||
+        d.action == ACTION_LATE_TARGET_SWITCH) {
+        FireAudioCue();
+    }
 }
 
 // Open/close hooks called from worker init / shutdown (commit 4 wires).
@@ -3710,7 +3744,8 @@ static std::atomic<uint64_t> g_binBytesWritten{0};
 static int g_binRotateIdx = 0;
 static constexpr uint64_t BIN_ROTATE_BYTES = 2ull * 1024 * 1024 * 1024;  // 2 GB
 
-static void LogF(const char* fmt, ...) {
+// Phase 4.2: linkage is external (no `static`) so audio.cpp can call it.
+void LogF(const char* fmt, ...) {
     if (!g_logFile) return;
     char buf[1024];
     va_list ap; va_start(ap, fmt);
@@ -4955,6 +4990,10 @@ static void RunPredictorTick(const PredictionConfig& engine_cfg,
 
 static DWORD WINAPI WorkerMain(LPVOID);
 
+// Phase 4.2: stored from DllMain so audio.cpp can FindResourceW the
+// embedded WAV. NOT static — audio.cpp declares it as `extern HMODULE`.
+HMODULE g_dllModule = nullptr;
+
 static HANDLE g_workerThread = nullptr;
 static HANDLE g_f11Thread = nullptr;
 
@@ -5006,6 +5045,17 @@ static DWORD WINAPI WorkerMain(LPVOID) {
     // detour-arms path stay viable even if the predictor goes silent.
     LoadParryDb();
 
+    // (d.2b) Initialize audio cue (Phase 4.2). Tries override path first,
+    // falls back to embedded resource. If both fail, audio is silently
+    // disabled but predictor + JSONL still run.
+    {
+        AudioCueConfig audio_cfg = {
+            g_cfg.audio_cue_enabled,
+            g_cfg.audio_cue_wav_path,
+        };
+        InitAudioCue(audio_cfg);
+    }
+
     // (d.3) Open prediction decision log if enabled. Reuses g_sessionTagPath
     // for naming consistency with the other session artifacts: file is
     // `<session>-<timestamp>.predictions.jsonl` alongside the .bin/.csv/.log.txt.
@@ -5033,6 +5083,7 @@ static DWORD WINAPI WorkerMain(LPVOID) {
         LogF("init_fail: wrong ER FileVersion %u.%u.%u.%u",
              major, minor, build, patch);
         while (g_running.load()) std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        ShutdownAudioCue();  // Phase 4.2: idempotent; frees override-WAV heap if held
         CloseSessionFiles();
         BootLogClose();
         return 0;
@@ -5054,6 +5105,7 @@ static DWORD WINAPI WorkerMain(LPVOID) {
         BootLog("init_fail: sig scan exhausted");
         LogF("init_fail: sig scan exhausted");
         while (g_running.load()) std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        ShutdownAudioCue();  // Phase 4.2: idempotent; frees override-WAV heap if held
         CloseSessionFiles();
         BootLogClose();
         return 0;
@@ -5077,6 +5129,7 @@ static DWORD WINAPI WorkerMain(LPVOID) {
         BootLog("init_fail: buffer pool alloc");
         LogF("init_fail: buffer pool alloc");
         while (g_running.load()) std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        ShutdownAudioCue();  // Phase 4.2: idempotent; frees override-WAV heap if held
         CloseSessionFiles();
         BootLogClose();
         return 0;
@@ -5097,6 +5150,7 @@ static DWORD WINAPI WorkerMain(LPVOID) {
             LogF("init_fail: hook install");
             while (g_running.load()) std::this_thread::sleep_for(std::chrono::milliseconds(500));
             BufferPoolFree();
+            ShutdownAudioCue();  // Phase 4.2: idempotent; frees override-WAV heap if held
             CloseSessionFiles();
             BootLogClose();
             return 0;
@@ -5344,6 +5398,13 @@ static DWORD WINAPI WorkerMain(LPVOID) {
          (unsigned long long)g_dropProducerEmerg.load(),
          (unsigned long long)g_truncatedSamples.load());
 
+    // Phase 4.2: stop any in-flight audio and release the buffer before
+    // the predictor sink shuts down. Must come before PredictionLogClose()
+    // because FireAudioCue could otherwise be called from a stray late
+    // WritePredictionDecision -- not a race today (worker loop has exited)
+    // but cheaper to enforce ordering than reason about it.
+    ShutdownAudioCue();
+
     // Close prediction log before session files since it has its own
     // critical section + handle.
     PredictionLogClose();
@@ -5503,6 +5564,11 @@ BOOL WINAPI DllMain(HMODULE hMod, DWORD reason, LPVOID) {
                 DebugBanner("DLL_PROCESS_ATTACH FAILED: cannot pin module; refusing to load");
                 return FALSE;
             }
+            // Phase 4.2: stash the module handle for audio.cpp's
+            // FindResourceW. hMod and pinned are equivalent here -- hMod is
+            // what the OS gave us on attach. Set BEFORE spawning the worker
+            // so InitAudioCue (which runs on the worker) sees a non-NULL.
+            g_dllModule = hMod;
             g_running.store(true);
             g_workerThread = CreateThread(nullptr, 0, WorkerMain, nullptr, 0, nullptr);
             DebugBanner("DLL_PROCESS_ATTACH (" PROBE_VERSION_STR ", module pinned)");
