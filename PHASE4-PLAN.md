@@ -1213,3 +1213,79 @@ the MVP-audio-only fallback is explicitly accepted.
 - Single-knob `audio_cue_parry_now` two-cue mode: implementation
   started, rolled back when scope grew larger than session window
   allowed. Design preserved in TODO doc for next-session pickup.
+
+### 2026-05-17 — Phase 4.3 instrumentation + data-gather plan (v4)
+
+**Accomplishments**
+
+- `audio_cue_lead_ms` tuned 200 → 150ms after Josh reported the 200ms lead
+  felt too early relative to the boss's visual commit. Deployed to station INI.
+- Phase 4.3 probe instrumentation landed in `probe/probe.cpp` (~141 lines):
+  - `CaptureSessionStartClocks()` — steady_clock + UTC wall-clock captured at
+    session start. UTC chosen to match Matroska `creation_time` epoch.
+  - `JsonEscapeString()` — safe JSON-string helper covering `"`, `\`, control
+    chars, `\u00XX` for codepoints < 0x20. Prevents JSON injection via
+    user-controlled INI fields.
+  - `PredictionLogOpen` emits a `session_open` JSON header as the first line
+    of every `.predictions.jsonl` (fields: `wall_clock_ms`, `session_start_ms`,
+    `probe_version`, full config snapshot).
+  - `WritePredictionDecision` adds `wall_clock_ms` to every prediction row.
+    Self-aligns to OBS recording wall-clock without any user-action anchor.
+  - `PROBE_VERSION_STR` → `v8.3.0-phase4.3-timing`.
+- Three rounds of Codex review caught real bugs before ship: uninitialized `tzi`
+  read, JSON injection via `session_name`, `cfg_mode` field writing wrong value,
+  buffer sizing wrong for worst-case 6x JSON escape expansion. All fixed.
+- v8.3.0 DLL built via SSH+MSBuild (SHA `eb96cd74...`, 284,672 bytes). Archived
+  to `probe/releases/parry-tell-probe-v8.3.0.dll`. **NOT yet deployed** —
+  awaiting Josh's "ready to reload" signal.
+- `TODO-PHASE-4.3-DATA-GATHER.md` rewritten four times, ending at ~250 lines
+  (critic-clean v4). Covers preflight gate, Test 1-4 sequence, JSONL
+  verification, and five pre-specified outcome branches.
+- Codex domain consultation on parry vs stagger semantics: no single TAE flag
+  governs parry-staggerability. Cheapest filter = TAE event type 304 (throw
+  detection). Harder cases need `regulation.bin` + AtkParam join.
+
+**Critical finding**
+
+- cid 4311 has **zero entries** in `data/parry_data.json`. The 4 Phase 4.2
+  fires must have routed through `resolved_cid ≠ raw_cid` family fallback.
+  Parent/family cid unidentified. Open item for the data-gather session.
+
+**Tried and ruled out**
+
+- Keyclick-audio-anchor protocol — 3 critic-blocked drafts; replaced by JSONL
+  self-instrumentation (Option B). Human speech-to-press lag (150-400ms) is
+  larger than the 150ms cue window; anchor protocol was structurally unsound.
+- Local-time `wall_clock_ms` — switched to UTC after Codex caught the
+  `ffprobe creation_time` mismatch.
+- Hyperarmor (FlagType=24) as parry-stagger filter — withdrawn; no single TAE
+  flag governs parry-staggerability.
+
+**Current state**
+
+- Phase 4.2 audio cue: **FUNCTIONALLY COMPLETE** (unchanged from last session)
+- Phase 4.3 instrumentation: **COMPILED, NOT YET SMOKE-TESTED**
+- Phase 4.3 data-gather session: **PENDING** (plan ready, DLL not deployed)
+- Phase 4.4 regression harness: NOT STARTED
+- Phase 4.5 release packaging: NOT STARTED
+
+**Next steps (priority order)**
+
+1. Deploy v8.3.0 DLL to `/mnt/station-mods/parry-tell-probe.dll` (Josh's
+   "ready to reload" signal required).
+2. Smoke test: verify `.predictions.jsonl` first line is a `session_open` event
+   with `wall_clock_ms` populated and prediction rows carry the new field.
+3. Run data-gather session per `TODO-PHASE-4.3-DATA-GATHER.md` (v4, critic-clean).
+4. Post-session: Claude builds `alignment.md`, classifies into one of five
+   pre-specified outcome branches, picks next phase (4.3.2 throw filter /
+   4.3.3 regulation.bin / 4.3.5 coverage diagnosis / 4.3.4 per-cid timing /
+   second gather session).
+
+**Open questions for Josh**
+
+- Re-confirm Test 4 boss choice (Margit, Tree Sentinel, other?) and that the
+  cid is reachable in current save.
+- OBS recording mode preference: Game Capture (convenient, process hooks) vs
+  Window Capture (safer for co-op-safety paranoia).
+- Install Cheat Engine for post-session investigation? (Recommended yes, offline
+  use only, from cheatengine.org with bundled-software offers declined.)

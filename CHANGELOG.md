@@ -1,3 +1,70 @@
+## 2026-05-17 — Phase 4.3 diagnostic instrumentation + data-gather planning
+
+### Added
+
+- `probe/probe.cpp` — Phase 4.3 self-aligning UTC wall-clock instrumentation:
+  - `CaptureSessionStartClocks()` — captures `steady_clock` + UTC wall-clock
+    at session start. UTC chosen (not local) so Matroska `creation_time` and
+    JSONL timestamps share the same epoch without a 5-hour CDT offset bug.
+  - `JsonEscapeString()` — safe JSON-string emission helper covering `"`, `\`,
+    control chars, and `\u00XX` for all codepoints < 0x20. Prevents JSON
+    injection via user-controlled INI fields (session_name, wav_path, etc.).
+  - `PredictionLogOpen` now emits a `session_open` JSON header as the first
+    line of every `.predictions.jsonl`: fields `wall_clock_ms`,
+    `session_start_ms`, `probe_version`, and a full config snapshot.
+  - `WritePredictionDecision` adds `wall_clock_ms` to every prediction row
+    (`session_start_wall + ts_ms_rel`). Self-aligns to OBS recording
+    wall-clock without any user-action anchor protocol.
+  - `PROBE_VERSION_STR` bumped to `v8.3.0-phase4.3-timing`.
+- `TODO-PHASE-4.3-DATA-GATHER.md` — v4 data-gather session protocol (critic-
+  clean after four drafts). ~250 lines covering preflight gate, Test 1-4
+  sequence, per-test JSONL verification, and five pre-specified outcome
+  branches for post-session analysis.
+
+### Changed
+
+- `probe/v6/parry-tell-probe.ini.smoke` — `audio_cue_lead_ms` 200 → 150 after
+  Josh reported the 200ms lead felt too early relative to the boss's visual
+  commit. Deployed to `/mnt/station-mods/parry-tell-probe.ini`.
+
+### Built (not yet deployed)
+
+- `probe/releases/parry-tell-probe-v8.3.0.dll` — SHA
+  `eb96cd749e977d96039a228447611c6edcf35a6489c6b5939fecff7e2d988c38`,
+  284,672 bytes. Built via SSH+MSBuild on station. Archived locally
+  (gitignored). **NOT yet copied to `/mnt/station-mods/`** — awaiting Josh's
+  "ready to reload" signal. No smoke test run yet; instrumentation is
+  compile-verified only.
+- v8.2.1 backed up on station as
+  `/mnt/station-mods/parry-tell-probe.dll.v8.2.1-backup`.
+
+### Research
+
+- Codex domain consultation on parry vs stagger semantics: confirmed no single
+  TAE flag governs parry-staggerability. Full chain is TAE → BehaviorParam →
+  AtkParam → NpcParam. Cheapest filter: TAE event type 304 (throw detection,
+  no extraction needed). Harder cases require `regulation.bin` extraction +
+  AtkParam join (full session of work).
+- Hyperarmor (FlagType=24) evaluated and withdrawn as a parry-stagger filter.
+
+### Critical finding
+
+- cid 4311 has **zero entries** in `data/parry_data.json`. The 4 confirmed
+  fires from the Phase 4.2 session must have routed through a
+  `resolved_cid ≠ raw_cid` family fallback. The parent/family cid is
+  unidentified. Flagged as an open item for the data-gather session to answer.
+
+### Tried and ruled out
+
+- Keyclick-audio-anchor protocol for OBS alignment — replaced by JSONL
+  self-instrumentation (Option B). Anchor protocol had human speech-to-press
+  lag (150-400ms) and clock-model bugs that three critic rounds could not
+  resolve without changing the substrate.
+- Local-time `wall_clock_ms` — switched to UTC after Codex caught the
+  `ffprobe creation_time` mismatch.
+- Plan-from-memory drafting — switched to read-code-then-plan after 3 critic
+  blocks in a row.
+
 ## 2026-05-15 (evening) — Phase 4.2 audio cue + first audible run
 
 ### Added
